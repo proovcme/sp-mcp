@@ -3,7 +3,7 @@
 [![Checks](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](CHANGELOG.md)
 
 **Найти норматив. Прочитать пункт. Проверить редакцию. Сохранить основание в проекте.**
 
@@ -73,8 +73,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 codex mcp add sp --env PYTHONUTF8=1 -- uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 ```
 
-Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.1`:
-`git+https://github.com/proovcme/sp-mcp.git@v0.2.1`.
+Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.2`:
+`git+https://github.com/proovcme/sp-mcp.git@v0.2.2`.
 
 Для разработки:
 
@@ -105,7 +105,7 @@ uv run sp-mcp sources
 ```bash
 uv run sp-mcp web
 # или из опубликованной версии:
-uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.1 sp-mcp web
+uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.2 sp-mcp web
 ```
 
 Откройте **http://127.0.0.1:8767/**. Это интерфейс той же SQLite-базы, которой пользуется MCP.
@@ -119,6 +119,11 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.1 sp-mcp web
 - При поиске в сети используются отдельные слова и рубрики источников, а не только буквальная строка запроса.
 - Два наиболее релевантных документа из доступных текстовых источников могут быть открыты и проиндексированы в ходе запроса.
 - Совпадения в пунктах показывают извлечённый текст и его точное положение. Смежные названия вынесены отдельно.
+- Недействующие нормативы автоматически скрываются из названий, текстовых фрагментов и библиотеки.
+  Флажок «Показывать недействующие» возвращает их для исторических задач. Отмена или замена определяется
+  по явному статусу источника, а не по возрасту документа. Непроверенный статус остаётся видимым с пометкой.
+- Понятийное расширение работает и при обнаружении в каталогах: для дымоудаления ищутся также
+  общие требования пожарной безопасности вентиляции, затем открывается и индексируется найденный текст.
 - Библиотека, история редакций, чтение пунктов и HTML-таблиц, сравнение текстов и история проверок.
 - Оглавление строится автоматически по заголовкам извлечённого текста, отдельно для каждой редакции.
   Повторы из печатного содержания исключаются; приложения сохраняют собственную нумерацию.

@@ -27,6 +27,41 @@ CONCEPTS = (
     ("огнестойкость", "огнестойкий", "огнезащита"),
 )
 
+# Subject discovery searches source catalogues as well as already saved texts.
+# A title must match every context phrase; ventilation alone is not smoke control.
+CATALOG_TOPICS = (
+    (
+        ("дымоудаление", "противодымный", "дымозащита"),
+        ("вентиляц", "противодымн"),
+        ("вентиляция", "пожарная безопасность"),
+    ),
+)
+
+
+def catalog_queries(query):
+    found = set(stems(query))
+    return list(
+        dict.fromkeys(
+            term
+            for trigger, queries, _ in CATALOG_TOPICS
+            if found & set(stems(" ".join(trigger)))
+            for term in queries
+        )
+    )
+
+
+def topic_relevance(query, title):
+    requested, present = set(stems(query)), set(stems(title))
+    return max(
+        (
+            1.25
+            for trigger, _, context in CATALOG_TOPICS
+            if requested & set(stems(" ".join(trigger)))
+            and all(set(stems(phrase)) <= present for phrase in context)
+        ),
+        default=0,
+    )
+
 
 def concepts(query):
     groups = []

@@ -6,11 +6,12 @@ from urllib.parse import urlencode, urljoin
 from .config import Config
 from .errors import NormsError
 from .identity import clean, designation
-from .linguistics import relevance, stems
+from .linguistics import catalog_queries, relevance, stems, topic_relevance
 from .network import Network, validate_url
 from .parsers import parse_candidates, parse_document, soup_for
 from .retrieval import Retrieval
 from .storage import Store
+from .validity import observed_validity, validity_index
 from .verification import verify
 
 CATALOGS = {
@@ -103,7 +104,9 @@ class Service:
         url = "https://new.gostinfo.ru/catalog?" + urlencode({"catalog": category, "q": query, "page": page})
         return self._catalog(url, refresh)
 
-    def search(self, query, limit=20, page=1, online=True, refresh=False, mode="concept"):
+    def search(
+        self, query, limit=20, page=1, online=True, refresh=False, mode="concept", include_inactive=False
+    ):
         query = clean(query)
         if not query or len(query) > 300:
             raise NormsError("INVALID_ARGUMENT", "query must contain 1..300 characters")
@@ -141,6 +144,14 @@ class Service:
                             except NormsError as exc:
                                 errors.append({"source": "gostinfo", **exc.payload()})
                                 break
+                if mode != "lexical":
+                    for expanded in catalog_queries(query):
+                        try:
+                            result = self._official_search(expanded, "sp", 1, refresh)
+                            remote.extend(result["items"])
+                            provenance.append(result["provenance"])
+                        except NormsError as exc:
+                            errors.append({"source": "gostinfo", **exc.payload()})
             if not code or code.startswith("СП "):
                 try:
                     for p in range(2):
@@ -158,6 +169,14 @@ class Service:
         values = list(combined.values())
         if code:
             values = [item for item in values if item["code"] == code]
+        topic_codes = {
+            item["code"] for item in values if mode != "lexical" and topic_relevance(query, item["title"])
+        }
+        for matched_code in topic_codes:
+            for candidate in self.store.candidates(matched_code, limit=30):
+                if candidate["code"] == matched_code and candidate["url"] not in combined:
+                    values.append(candidate)
+                    combined[candidate["url"]] = candidate
         values.sort(
             key=lambda item: (
                 item["code"] != code if code else -relevance(query, item["title"]),
@@ -172,7 +191,7 @@ class Service:
                 for item in values
                 if item["source"] == "meganorm"
                 and item.get("change_number") is None
-                and topic in stems(item["title"])
+                and (topic in stems(item["title"]) or item["code"] in topic_codes)
             ]
             if "газов" in stems(query):
                 topical = [
@@ -185,21 +204,37 @@ class Service:
                 years = re.findall(r"(?:19|20)\d{2}", item["code"])
                 return int(years[-1]) if years else 0
 
-            topical.sort(key=lambda item: ("проектирован" not in stems(item["title"]), -year(item)))
-            for item in topical[:2]:
+            topical.sort(
+                key=lambda item: (
+                    item["code"] not in topic_codes,
+                    bool(re.search(r"методические рекомендации|письмо|проект свода", item["title"], re.I)),
+                    "проектирован" not in stems(item["title"]),
+                    -year(item),
+                )
+            )
+            hydrated_codes = set()
+            attempts = 0
+            for item in topical:
+                if item["code"] in hydrated_codes:
+                    continue
+                if attempts >= 3:
+                    break
+                attempts += 1
                 try:
                     summary = self.open(item["url"], latest_revision=True)
                     hydrated.append(summary["snapshot_id"])
+                    hydrated_codes.add(item["code"])
+                    if len(hydrated_codes) == 2:
+                        break
                 except NormsError as exc:
                     errors.append({"source": "meganorm", **exc.payload()})
         retrieval = self.retrieval.search(query, mode=mode if not code else "lexical", limit=limit * 3)
-        text_hits, seen_hits = [], set()
+        text_hits = []
         for item in retrieval["items"]:
             if code and item["code"] != code:
                 continue
-            if item["kind"] == "text" and item["code"] not in seen_hits:
+            if item["kind"] == "text":
                 text_hits.append(item | {"excerpt": item["text"], "query": query})
-                seen_hits.add(item["code"])
             elif item["kind"] == "title" and not any(v["url"] == item["url"] for v in values):
                 values.append(
                     {
@@ -212,15 +247,31 @@ class Service:
                     }
                 )
 
-        def catalogue_cancelled(item):
-            return bool(
-                re.search(re.escape(item["code"]) + r"\s+(?:Отменен|Заменен|Утратил)", item["title"], re.I)
+        text_hits.sort(
+            key=lambda item: (
+                -item.get("word_coverage", 0),
+                not bool(item.get("clause")),
+                len(item["text"]) < 90,
+                -item.get("score", 0),
             )
+        )
+        unique_hits = {}
+        for item in text_hits:
+            unique_hits.setdefault(item["code"], item)
+        text_hits = list(unique_hits.values())
 
-        cancelled_codes = {item["code"] for item in values if catalogue_cancelled(item)}
+        status_index = validity_index(self.store, self.config.freshness_days)
+        cancelled_codes = {code for code, status in status_index.items() if status["hidden_by_default"]}
+        excluded_codes = {item["code"] for item in values + text_hits if item["code"] in cancelled_codes}
+        for item in values + text_hits:
+            item["validity"] = observed_validity(status_index, item["code"])
+        if not include_inactive:
+            values = [item for item in values if item["code"] not in cancelled_codes]
+            text_hits = [item for item in text_hits if item["code"] not in cancelled_codes]
         values.sort(
             key=lambda item: (
                 item["code"] in cancelled_codes,
+                item["code"] not in topic_codes,
                 not item["code"].startswith(("СП ", "ГОСТ")),
                 item["code"] != code if code else -relevance(query, item["title"]),
                 item.get("change_number") is not None,
@@ -232,6 +283,7 @@ class Service:
         text_hits.sort(
             key=lambda item: (
                 item["code"] in cancelled_codes,
+                item["code"] not in topic_codes,
                 not item["code"].startswith(("СП ", "ГОСТ")),
                 -item.get("word_coverage", 0),
             )
@@ -243,7 +295,9 @@ class Service:
             for item in values:
                 (
                     primary
-                    if relevance(query, item["title"]) >= 1 or item["code"] in direct_text_codes
+                    if relevance(query, item["title"]) >= 1
+                    or item["code"] in direct_text_codes
+                    or item["code"] in topic_codes
                     else related
                 ).append(item)
             values = primary
@@ -260,6 +314,11 @@ class Service:
             "more_results_possible": len(values) > start + limit,
             "retrieval": {k: v for k, v in retrieval.items() if k != "items"},
             "hydrated_snapshots": hydrated,
+            "validity_filter": {
+                "include_inactive": include_inactive,
+                "excluded_count": 0 if include_inactive else len(excluded_codes),
+                "unknown_status_policy": "visible_marked_unverified",
+            },
             "coverage": "Discovered catalogue titles and saved source fragments; not the complete Russian normative corpus.",
             "match_status": "candidate" if values or text_hits else "not_found_in_searched_sources",
         }
@@ -518,10 +577,21 @@ class Service:
             "limitations": ["Literal extraction diff; not an official amendment or legal interpretation."],
         }
 
-    def library(self, query="", limit=30, offset=0):
+    def library(self, query="", limit=30, offset=0, include_inactive=False):
         bound(limit, 1, 100, "limit")
         bound(offset, 0, 1000000, "offset")
-        return self.store.library(query, limit, offset)
+        index = validity_index(self.store, self.config.freshness_days)
+        excluded = {code for code, status in index.items() if status["hidden_by_default"]}
+        result = self.store.library(
+            query, limit, offset, excluded_codes=excluded if not include_inactive else None
+        )
+        for item in result["items"]:
+            item["validity"] = observed_validity(index, item["code"])
+        result["validity_filter"] = {
+            "include_inactive": include_inactive,
+            "unknown_status_policy": "visible_marked_unverified",
+        }
+        return result
 
     def document(self, snapshot_id):
         doc = self.store.get(snapshot_id)

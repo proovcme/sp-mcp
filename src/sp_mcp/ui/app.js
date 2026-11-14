@@ -30,19 +30,21 @@ async function api(method,args={}){
 function routeToDoc(id){if(location.hash === '#document/'+id)loadDocument(id).catch(globalError);else location.hash='document/'+id;}
 function globalError(error){showMessage(humanError(error),'#global-message',true);}
 async function refreshCount(){try{const data=await api('library',{limit:1});$('#library-count').textContent=data.total||'';}catch{/* Main actions report connection errors. */}}
+function documentCount(n){const last=n%10,lastTwo=n%100;return n+' '+(last===1&&lastTwo!==11?'документ':last>=2&&last<=4&&(lastTwo<12||lastTwo>14)?'документа':'документов');}
+function validityBadge(item){const v=item.validity||{state:'unknown'};const names={active:'Действует по источнику',cancelled:'Не действует',replaced:'Заменён',not_yet_effective:'Ещё не действует',conflict:'Статус: расхождение',unknown:'Статус не проверен'};return `<span class="status-label ${v.state==='active'?'good':'warn'}">${esc(names[v.state]||names.unknown)}</span>`;}
 function resultCards(items, textHits=[]){
   const grouped=new Map();
   for(const item of items){const key=item.code||item.url||item.snapshot_id;if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(item);}
   let html='';
   for(const [code,group] of grouped){
-    const primary=group.find(x=>x.source==='meganorm'&&x.change_number==null)||group.find(x=>x.change_number==null)||group[0];
+    const body=group.filter(x=>x.source==='meganorm'&&x.change_number==null&&!/методические рекомендации|письмо|проект свода/i.test(x.title||''));const primary=body.find(x=>x.snapshot_id)||body[0]||group.find(x=>x.change_number==null)||group[0];
     const action=primary.snapshot_id ? `data-snapshot="${esc(primary.snapshot_id)}"` : `data-url="${esc(primary.url)}"`;
     const selected=state.doc?.code===code?' selected':'';
-    html+=`<article class="result-card${selected}"><button class="result-button" ${action}><span class="result-code">${esc(code)}<span class="file-label">${primary.text_status==='metadata_only'||primary.source==='gostinfo'?'КАРТОЧКА':'ДОКУМЕНТ'}</span></span><span class="result-title">${esc(shortTitle(primary))}</span><span class="result-bottom"><span>${esc(sourceName(primary.source))}</span><i class="source-dot"></i><span>${primary.catalogue_warning?'<span class="status-label warn">В каталоге: отменён или заменён</span>':''}${primary.edition_date?'Ред. '+date(primary.edition_date):primary.snapshot_id?'Сохранён в общей базе':'Найден в каталоге'}</span></span></button>`;
+    html+=`<article class="result-card${selected}"><button class="result-button" ${action}><span class="result-code">${esc(code)}<span class="file-label">${primary.text_status==='metadata_only'||primary.source==='gostinfo'?'КАРТОЧКА':'ДОКУМЕНТ'}</span></span><span class="result-title">${esc(shortTitle(primary))}</span><span class="result-bottom"><span>${esc(sourceName(primary.source))}</span><i class="source-dot"></i><span>${validityBadge(primary)}${primary.edition_date?'Ред. '+date(primary.edition_date):primary.snapshot_id?'Сохранён в общей базе':'Найден в каталоге'}</span></span></button>`;
     if(group.length>1)html+=`<details class="candidate-details"><summary>Ещё источники и изменения · ${group.length-1}</summary>${group.filter(x=>x!==primary).map(x=>`<button ${x.snapshot_id?`data-snapshot="${esc(x.snapshot_id)}"`:`data-url="${esc(x.url)}"`}>${esc(x.change_number?'Изменение № '+x.change_number:sourceName(x.source))}${x.edition_date?' · '+date(x.edition_date):''}</button>`).join('')}</details>`;
     html+='</article>';
   }
-  if(textHits.length)html+='<div class="section-bar"><h3>В текстах сохранённых документов</h3></div>'+textHits.map(hit=>`<article class="result-card"><button class="result-button" data-hit="${esc(hit.snapshot_id)}" data-hit-query="${esc(state.query)}" data-hit-start="${Number(hit.start)||0}"><span class="result-code">${esc(hit.code)}</span><span class="result-title">${esc(hit.excerpt)}</span><span class="result-bottom">${hit.clause?'Пункт '+esc(hit.clause)+' · ':''}Открыть фрагмент →</span></button></article>`).join('');
+  if(textHits.length)html+='<div class="section-bar"><h3>В текстах сохранённых документов</h3></div>'+textHits.map(hit=>`<article class="result-card"><button class="result-button" data-hit="${esc(hit.snapshot_id)}" data-hit-query="${esc(state.query)}" data-hit-start="${Number(hit.start)||0}"><span class="result-code">${esc(hit.code)}</span><span class="result-title">${esc(hit.excerpt)}</span><span class="result-bottom">${validityBadge(hit)} ${hit.clause?'Пункт '+esc(hit.clause)+' · ':''}Открыть фрагмент →</span></button></article>`).join('');
   if(textHits.length){const marker='<div class="section-bar"><h3>В текстах сохранённых документов</h3></div>';const at=html.indexOf(marker);if(at>=0)html=html.slice(at)+html.slice(0,at);}
   return html;
 }
@@ -53,8 +55,8 @@ function wireResults(root){
 }
 async function library(){
   const generation=++state.searchEpoch;$('#results-eyebrow').textContent='ОБЩАЯ БАЗА';$('#results-title').textContent='Сохранённые документы';$('#results-count').textContent='';$('#results').innerHTML=loading('Читаем библиотеку…');$('#results-pagination').innerHTML='';
-  const data=await api('library',{limit:30,offset:(state.page-1)*30});if(generation!==state.searchEpoch)return;
-  $('#results-count').textContent=data.total+' документов';
+  const data=await api('library',{limit:30,offset:(state.page-1)*30,include_inactive:$('#include-inactive').checked});if(generation!==state.searchEpoch)return;
+  $('#results-count').textContent=documentCount(data.total);
   $('#results').innerHTML=data.items.length?resultCards(data.items):`<div class="empty-state"><h3>Библиотека готова к работе</h3><p>Найдите документ в каталогах или откройте его по ссылке. Текст и редакция сохранятся в общей базе для GUI и MCP.</p><div class="suggestions"><button data-suggestion="СП 60.13330.2020">СП 60.13330.2020</button><button data-suggestion="вентиляция">Вентиляция</button></div></div>`;
   wireResults($('#results'));wireSuggestions();paginate(data.next_offset!==null,()=>library().catch(globalError));
 }
@@ -63,13 +65,13 @@ function wireSuggestions(){document.querySelectorAll('[data-suggestion]').forEac
 async function search(){
   const query=$('#query').value.trim();if(!query){await library();return;}
   const generation=++state.searchEpoch;state.query=query;showMessage('');$('#search-submit').disabled=true;$('#results-eyebrow').textContent='ПОИСК ПО НОРМАТИВАМ';$('#results-title').textContent='Результаты';$('#results-count').textContent='';$('#results').innerHTML=loading('Ищем в выбранных источниках…');$('#results-pagination').innerHTML='';
-  try{const data=await api('search',{query,limit:20,page:state.page,online:$('#search-mode').value==='online',mode:$('#ranking-mode').value});if(generation!==state.searchEpoch)return;
-    $('#results-count').textContent=new Set(data.items.map(i=>i.code)).size+' документов';
+  try{const data=await api('search',{query,limit:20,page:state.page,online:$('#search-mode').value==='online',mode:$('#ranking-mode').value,include_inactive:$('#include-inactive').checked});if(generation!==state.searchEpoch)return;
+    $('#results-count').textContent=documentCount(new Set([...data.items,...data.text_hits].map(i=>i.code)).size)+(data.validity_filter?.excluded_count?' · скрыто '+data.validity_filter.excluded_count+' недействующих':'');
     $('#results').innerHTML=data.items.length||data.text_hits.length?resultCards(data.items,data.text_hits):'<div class="empty-state"><h3>Совпадения не найдены</h3><p>Попробуйте обозначение целиком или более короткое слово. В текстах поиск охватывает только сохранённые документы.</p></div>';
     if(data.related_items?.length)$('#results').insertAdjacentHTML('beforeend','<details class="candidate-details"><summary>Смежные документы · '+data.related_items.length+'</summary>'+resultCards(data.related_items)+'</details>');
     wireResults($('#results'));if(data.retrieval?.semantic_limitation&&$('#ranking-mode').value==='hybrid')showMessage('Локальные эмбеддинги не использованы: индекс не подготовлен или недоступен. Показаны результаты по словам.');if(data.retrieval?.query_corrections&&Object.keys(data.retrieval.query_corrections).length)showMessage('Учтены близкие написания слов. Проверьте найденные документы и контекст.');if(data.source_errors.length)showMessage('Часть источников недоступна. Доступные результаты показаны; полнота поиска не подтверждена.');
     paginate(data.more_results_possible||data.items.length===20,()=>search().catch(globalError));
-    const url=new URL(location.href);url.searchParams.set('q',query);history.replaceState(null,'',url);refreshCount();
+    const url=new URL(location.href);url.searchParams.set('q',query);if($('#include-inactive').checked)url.searchParams.set('include_inactive','1');else url.searchParams.delete('include_inactive');history.replaceState(null,'',url);refreshCount();
   }finally{if(generation===state.searchEpoch)$('#search-submit').disabled=false;}
 }
 async function openUrl(url,button=null,latest=false){
@@ -186,9 +188,10 @@ async function route(){
 }
 async function boot(){
   const headers=state.token?{Authorization:'Bearer '+state.token}:{};const response=await fetch(new URL('api/ui-config',base),{headers});
-  if(response.status===401){if(state.token)$('#auth-error').textContent='Токен не принят. Проверьте значение и повторите.';$('#auth-dialog').showModal();return;}if(!response.ok)throw Error('Не удалось подключиться к серверу SP MCP.');state.config=await response.json();$('#version').textContent='v'+state.config.version;$('#query').value=new URLSearchParams(location.search).get('q')||'';await refreshCount();await route();
+  if(response.status===401){if(state.token)$('#auth-error').textContent='Токен не принят. Проверьте значение и повторите.';$('#auth-dialog').showModal();return;}if(!response.ok)throw Error('Не удалось подключиться к серверу SP MCP.');state.config=await response.json();$('#version').textContent='v'+state.config.version;$('#query').value=new URLSearchParams(location.search).get('q')||'';$('#include-inactive').checked=new URLSearchParams(location.search).get('include_inactive')==='1';await refreshCount();await route();
 }
 $('#search-form').onsubmit=e=>{e.preventDefault();state.page=1;if(!location.hash||location.hash==='#search'||location.hash.startsWith('#document/'))search().catch(globalError);else location.hash='search';};
+$('#include-inactive').onchange=()=>{state.page=1;(location.hash==='#library'||!$('#query').value.trim()?library():search()).catch(globalError);};
 $('#ranking-mode').onchange=()=>{const neural=$('#ranking-mode').value==='hybrid';$('#prepare-search').hidden=!neural;$('.quiet-tag').textContent=neural?'Локальные эмбеддинги · без облака':'Без моделей и API-ключей';};
 $('#prepare-search').onclick=async()=>{try{const r=await api('prepare_search');showMessage('Подготовка локального смыслового индекса запущена. Базовый поиск продолжает работать.');pollIndex();}catch(e){globalError(e);}};
 async function pollIndex(){const r=await api('search_status');showMessage('Индекс эмбеддингов: '+r.ready_segments+' / '+r.total_segments+' фрагментов. '+({preparing:'Подготовка…',running:'Индексирование…',complete:'Готово.',failed:'Остановлен с ошибкой.'}[r.job.state]||''));if(['preparing','running'].includes(r.job.state))setTimeout(()=>pollIndex().catch(globalError),2000);}

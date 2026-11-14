@@ -223,7 +223,7 @@ class Store:
             raise NormsError("INTEGRITY_ERROR", "Saved verification payload was modified")
         return report | {"verification_id": ident}
 
-    def library(self, query="", limit=30, offset=0, code=None):
+    def library(self, query="", limit=30, offset=0, code=None, excluded_codes=None):
         """Latest extraction per URL, from the same database used by MCP; no network."""
         with self.db() as db:
             rows = db.execute("""SELECT s.id,s.payload,MAX(o.checked_at) checked_at
@@ -236,6 +236,8 @@ class Store:
             if not doc.get("provenance", {}).get("extraction_sha256"):
                 continue
             if code and doc.get("code") != code:
+                continue
+            if excluded_codes and doc.get("code") in excluded_codes:
                 continue
             if any(
                 token not in (doc["title"] + " " + doc["code"]).casefold()

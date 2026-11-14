@@ -69,14 +69,17 @@ def create_server(config):
         online: bool = True,
         refresh: bool = False,
         mode: str = "concept",
+        include_inactive: bool = False,
     ) -> dict:
         """Search by full designation or words. Returns candidates, never confirmed applicability.
         Online search queries official SP/GOST metadata and bounded MegaNorm SP catalogues.
         Default concept mode uses Russian morphology, BM25, spelling corrections and a curated lexicon, no model.
         Optional hybrid/semantic modes require a separately configured local embedding index; no generation API.
+        Explicitly inactive documents are hidden by default; include_inactive restores historical results.
+        Unknown or conflicting status remains visible and is never labelled active.
         Page is the official search page; inspect source_errors and search coverage.
         """
-        return service.search(query, limit, page, online, refresh, mode)
+        return service.search(query, limit, page, online, refresh, mode, include_inactive)
 
     @tool(read)
     def sp_browse_catalog(
