@@ -1,6 +1,8 @@
 # Import inside the existing HTTPS site block, before its fallback handle.
 redir /sp /sp/ 308
 handle_path /sp/* {
+    # Keep the browser bundle compatible with clients negotiating several encodings.
+    encode gzip
     request_body {
         max_size 64KB
     }
