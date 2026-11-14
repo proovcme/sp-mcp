@@ -612,10 +612,14 @@ class Service:
             ),
         }
 
-    def contents(self, snapshot_id):
+    def contents(self, snapshot_id, expanded=False, query="", offset=0, limit=300):
         from .contents import document_contents
 
-        return document_contents(self.store.get(snapshot_id))
+        bound(offset, 0, 100000, "offset")
+        bound(limit, 1, 500, "limit")
+        if len(query) > 100:
+            raise NormsError("INVALID_ARGUMENT", "Contents query must be at most 100 characters")
+        return document_contents(self.store.get(snapshot_id), expanded, query, offset, limit)
 
     def verifications(self, snapshot_id=None, limit=30, offset=0):
         bound(limit, 1, 100, "limit")

@@ -47,3 +47,28 @@ def test_contents_ignores_abbreviated_front_toc_and_preserves_appendix_numbering
     ]
     for item in items:
         assert item["start"] == doc["text"].rfind(item["title"])
+
+
+def test_expanded_contents_has_deep_clauses_lettered_subpoints_and_search_pagination(config):
+    service = Service(config)
+    long = "7.11.1.2 Синтетическое условие " + "для учебного примера " * 20 + "контрольнаяфраза."
+    raw = fetched(f"""<title>СП 900.100.2099. Учебный документ</title>
+        <div>1 Область применения</div><div>7.11.1 Заголовок печатного содержания</div>
+        <div>1 ОБЛАСТЬ ПРИМЕНЕНИЯ</div><div>7.11 Учебный раздел</div>
+        <div>7.11.1 Синтетическое требование к учебной системе.</div><div>{long}</div>
+        <div>а) учебное первое условие;</div><div>б) учебное второе условие.</div>
+        <div>Приложение А</div><div>А.1.1.1 Глубокий учебный пункт.</div>""")
+    doc = service.store.save(raw, parse_document(raw))
+    result = service.contents(doc["snapshot_id"], expanded=True)
+    items = result["items"]
+    deep = next(i for i in items if i["number"] == "7.11.1.2")
+    assert deep["title_truncated"] and deep["level"] == 3
+    assert doc["text"][deep["start"] : deep["end"]] == long
+    assert all(i["parent_number"] == "7.11.1.2" for i in items if i["kind"] == "subpoint")
+    assert next(i for i in items if i["number"] == "7.11.1")["title"].endswith("учебной системе.")
+    assert any(i["number"] == "А.1.1.1" for i in items)
+    found = service.contents(doc["snapshot_id"], expanded=True, query="контрольнаяфраза")
+    assert len(found["items"]) == 1 and found["items"][0]["number"] == "7.11.1.2"
+    first = service.contents(doc["snapshot_id"], expanded=True, limit=3)
+    second = service.contents(doc["snapshot_id"], expanded=True, offset=first["next_offset"], limit=3)
+    assert first["items"] + second["items"] == items[:6]

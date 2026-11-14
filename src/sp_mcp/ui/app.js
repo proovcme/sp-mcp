@@ -130,12 +130,22 @@ async function renderText(){
   if(doc.table_count){$('#table-controls').innerHTML=`<details class="diagnostics"><summary>Таблицы документа · ${doc.table_count}</summary><div class="reader-toolbar"><label for="table-index">Выберите таблицу<select id="table-index">${Array.from({length:doc.table_count},(_,i)=>`<option value="${i}">${esc(doc.table_captions?.find(t=>t.index===i)?.caption||'Таблица '+(i+1))}</option>`).join('')}</select></label><button id="load-table" class="button">Показать таблицу</button></div><div id="table-result"></div></details>`;$('#load-table').onclick=()=>loadTable(0,false).catch(readerError);}
 }
 async function loadContents(doc,epoch){
-  const data=await api('contents',{snapshot_id:doc.snapshot_id});
-  if(!sameDoc(doc,epoch)||state.tab!=='text'||!data.items.length)return;
-  $('#contents-panel').innerHTML=`<details class="contents" open><summary>Оглавление документа <span>${data.items.length} разделов и приложений</span></summary><nav aria-label="Оглавление документа">${data.items.map(item=>`<button type="button" class="contents-item ${item.level?'subsection':''}" data-contents-start="${item.start}">${esc(item.title)}</button>`).join('')}</nav><p>Автоматически выделено из текста. Переход ведёт к заголовку в основном документе.</p></details>`;
-  $('#contents-panel').querySelectorAll('[data-contents-start]').forEach(button=>button.onclick=async()=>{
-    try{await readChunk(Number(button.dataset.contentsStart),false,doc,epoch);if(sameDoc(doc,epoch)&&state.tab==='text'){$('#contents-panel details').open=false;$('#document-text').scrollIntoView({behavior:'auto',block:'nearest'});}}catch(error){readerError(error);}
-  });
+  if(!sameDoc(doc,epoch)||state.tab!=='text')return;
+  const expanded=state.contentsExpanded??true;let generation=0,timer;
+  $('#contents-panel').innerHTML=`<details class="contents" open><summary>Оглавление документа <span id="contents-count"></span></summary><div class="contents-tools"><label for="contents-mode">Показывать<select id="contents-mode"><option value="all" ${expanded?'selected':''}>Все пункты и подпункты</option><option value="sections" ${expanded?'':'selected'}>Разделы и приложения</option></select></label><label for="contents-query">Найти пункт<input id="contents-query" type="search" maxlength="100" placeholder="Номер или слова из пункта"></label></div><nav aria-label="Оглавление документа"></nav><button type="button" class="button small" id="contents-more" hidden>Ещё пункты ↓</button><p>Подписи выделены из текста. Длинные пункты сокращены; переход открывает исходный текст.</p></details>`;
+  async function refresh(offset=0,append=false){
+    if(!sameDoc(doc,epoch)||state.tab!=='text')return;const current=++generation;
+    const data=await api('contents',{snapshot_id:doc.snapshot_id,expanded:$('#contents-mode').value==='all',query:$('#contents-query').value.trim(),offset,limit:300});
+    if(current!==generation||!sameDoc(doc,epoch)||state.tab!=='text')return;
+    $('#contents-count').textContent='Найдено: '+data.total;
+    const nav=$('#contents-panel nav');const html=data.items.map(item=>`<button type="button" class="contents-item depth-${Math.min(Number(item.level)||0,8)}" data-contents-start="${item.start}">${item.kind==='subpoint'&&item.parent_number?'<small>'+esc(item.parent_number)+' · </small>':''}${esc(item.title)}${item.title_truncated?'…':''}</button>`).join('');
+    if(append)nav.insertAdjacentHTML('beforeend',html);else nav.innerHTML=html||'<p class="form-note">Пункты не найдены в извлечённом тексте.</p>';
+    nav.querySelectorAll('[data-contents-start]').forEach(button=>button.onclick=async()=>{try{await readChunk(Number(button.dataset.contentsStart),false,doc,epoch);if(sameDoc(doc,epoch)&&state.tab==='text'){$('#contents-panel details').open=false;$('#document-text').scrollIntoView({behavior:'auto',block:'nearest'});}}catch(error){readerError(error);}});
+    $('#contents-more').hidden=data.next_offset==null;$('#contents-more').onclick=()=>refresh(data.next_offset,true).catch(readerError);
+  }
+  $('#contents-mode').onchange=()=>{state.contentsExpanded=$('#contents-mode').value==='all';refresh().catch(readerError);};
+  $('#contents-query').oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>refresh().catch(readerError),400);};
+  await refresh();
 }
 function sameDoc(doc,epoch){return state.doc?.snapshot_id===doc.snapshot_id&&epoch===state.epoch;}
 function readerError(error){showMessage(humanError(error),'#reader-message',true);}

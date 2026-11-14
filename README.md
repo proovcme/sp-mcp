@@ -3,7 +3,7 @@
 [![Checks](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)](CHANGELOG.md)
 
 **Найти норматив. Прочитать пункт. Проверить редакцию. Сохранить основание в проекте.**
 
@@ -73,8 +73,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 codex mcp add sp --env PYTHONUTF8=1 -- uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 ```
 
-Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.3`:
-`git+https://github.com/proovcme/sp-mcp.git@v0.2.3`.
+Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.4`:
+`git+https://github.com/proovcme/sp-mcp.git@v0.2.4`.
 
 Для разработки:
 
@@ -105,7 +105,7 @@ uv run sp-mcp sources
 ```bash
 uv run sp-mcp web
 # или из опубликованной версии:
-uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.3 sp-mcp web
+uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.4 sp-mcp web
 ```
 
 Откройте **http://127.0.0.1:8767/**. Это интерфейс той же SQLite-базы, которой пользуется MCP.
@@ -128,6 +128,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.3 sp-mcp web
 - Оглавление строится автоматически по заголовкам извлечённого текста, отдельно для каждой редакции.
   Повторы из печатного содержания исключаются; приложения сохраняют собственную нумерацию.
   Это навигация по распознанному тексту: у сканов без текстового слоя оглавление недоступно.
+- Расширенный режим включает пункты, глубокие подпункты и перечисления «а)», «б)».
+  Есть поиск по номеру и полному тексту пункта; большие оглавления подгружаются порциями.
 - Таблицы HTML отображаются в тексте с исходными объединениями ячеек. Таблицы из псевдографики
   сохраняют пробелы оригинала, Markdown-таблицы отображаются сеткой; содержимое источника не исполняется.
 - Связь с выбранным проектом и исходным документом «Увязки», предварительный просмотр и контролируемое обновление.

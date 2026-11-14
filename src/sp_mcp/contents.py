@@ -5,9 +5,15 @@ import re
 from .identity import clean
 
 
-def document_contents(document):
+def document_contents(document, expanded=False, query="", offset=0, limit=300):
     if document["text_status"] == "metadata_only":
-        return {"items": [], "reason": "metadata_only", "provenance": document["provenance"]}
+        return {
+            "items": [],
+            "total": 0,
+            "next_offset": None,
+            "reason": "metadata_only",
+            "provenance": document["provenance"],
+        }
     candidates = []
     excluded = re.compile(
         r"^(?:ИСПОЛНИТЕЛИ|ВНЕСЕН|ПОДГОТОВЛЕН|УТВЕРЖДЕН|ЗАРЕГИСТРИРОВАН|ВВЕДЕН|ПЕРЕСМОТР|Утвердить|Признать|Контроль)",
@@ -93,14 +99,101 @@ def document_contents(document):
             key = (scope, "section", item["number"])
         else:
             key = ("heading", item["title"].casefold())
+        item["scope"] = scope
         selected[key] = item
     items = sorted(selected.values(), key=lambda x: x["start"])
+    if expanded:
+        items = expanded_items(document, items)
+    if query:
+        if re.fullmatch(r"(?:[А-ЯA-ZЁ]\.)?\d+(?:\.\d+)*", query, re.I):
+            items = [
+                item
+                for item in items
+                if (item.get("number") or "").casefold() == query.casefold()
+                or (item.get("number") or "").casefold().startswith(query.casefold() + ".")
+                or (item.get("parent_number") or "").casefold() == query.casefold()
+                or (item.get("parent_number") or "").casefold().startswith(query.casefold() + ".")
+            ]
+        else:
+            items = [
+                item
+                for item in items
+                if query.casefold() in document["text"][item["start"] : item["end"]].casefold()
+            ]
     return {
-        "items": items,
+        "items": items[offset : offset + limit],
         "total": len(items),
-        "method": "literal_heading_patterns_body_and_appendix_scopes",
+        "next_offset": offset + limit if offset + limit < len(items) else None,
+        "expanded": expanded,
+        "method": "literal_numbered_clauses_and_subpoints"
+        if expanded
+        else "literal_heading_patterns_body_and_appendix_scopes",
         "provenance": document["provenance"],
         "limitations": [
             "Automatically detected headings in extracted text; not a certified official table of contents."
         ],
     }
+
+
+def expanded_items(document, headings):
+    main = [
+        item
+        for item in headings
+        if item["kind"] == "section" and item["scope"] == "main" and item["number"] == "1"
+    ]
+    body_start = main[0]["start"] if main else 0
+    special = {item["start"]: item for item in headings if item["kind"] in {"heading", "appendix"}}
+    selected = {("heading", item["title"]): item for item in special.values() if item["start"] < body_start}
+    scope, parent, parent_level = "main", None, 0
+    for block in document["blocks"]:
+        if block["kind"] == "table":
+            continue
+        position = block["start"]
+        for raw in block["text"].splitlines(keepends=True):
+            line = clean(raw)
+            start = position + len(raw) - len(raw.lstrip())
+            position += len(raw)
+            if start < body_start:
+                continue
+            if start in special:
+                item = dict(special[start])
+                if item["kind"] == "appendix":
+                    scope, parent = item["scope"], None
+                selected[(item["kind"], scope, item["number"], item["title"])] = item
+                continue
+            match = re.match(r"^((?:[А-ЯA-ZЁ]\.)?\d+(?:\.\d+){0,7})([.)]?)\s+(.+)$", line)
+            letter = re.match(r"^([а-яa-zё])\)\s+(.+)$", line, re.I)
+            if match:
+                number, punctuation, title = match.groups()
+                if re.match(r"[-–—=]|\d+\s*[-–—]", title):
+                    continue
+                if punctuation == ")":
+                    if parent is None:
+                        continue
+                    number += ")"
+                    kind, level, parent_number = "subpoint", parent_level + 1, parent
+                else:
+                    numeric = re.sub(r"^[А-ЯA-ZЁ]\.", "", number)
+                    level = numeric.count(".") + (numeric != number)
+                    kind = "clause"
+                    parent_number = number.rsplit(".", 1)[0] if "." in number else None
+                    parent, parent_level = number, level
+            elif letter and parent is not None:
+                number, title = letter[1] + ")", letter[2]
+                kind, level, parent_number = "subpoint", parent_level + 1, parent
+            else:
+                continue
+            key = (scope, kind, parent_number, number)
+            selected[key] = {
+                "title": line[:170],
+                "title_truncated": len(line) > 170,
+                "number": number,
+                "parent_number": parent_number,
+                "level": level,
+                "kind": kind,
+                "scope": scope,
+                "start": start,
+                "end": start + len(raw.strip()),
+                "block_index": block["index"],
+            }
+    return sorted(selected.values(), key=lambda item: item["start"])

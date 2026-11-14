@@ -114,11 +114,15 @@ def create_server(config):
         return service.outline(snapshot_id, offset, limit)
 
     @tool(local)
-    def sp_document_contents(snapshot_id: str) -> dict:
+    def sp_document_contents(
+        snapshot_id: str, expanded: bool = False, query: str = "", offset: int = 0, limit: int = 300
+    ) -> dict:
         """Automatically detected sections/subsections/appendices with exact source text offsets.
         Repeated contents/body headings resolve to the later body occurrence. Not a certified official TOC.
+        expanded includes numbered clauses, deep subclauses and lettered subpoints with source offsets.
+        query searches every detected item's full source text; use pagination for long documents.
         """
-        return service.contents(snapshot_id)
+        return service.contents(snapshot_id, expanded, query, offset, limit)
 
     @tool(local)
     def sp_read_clause(snapshot_id: str, number: str, expected_sha256: str | None = None) -> dict:
