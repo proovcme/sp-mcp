@@ -3,7 +3,7 @@
 [![Checks](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](CHANGELOG.md)
 
 **Найти норматив. Прочитать пункт. Проверить редакцию. Сохранить основание в проекте.**
 
@@ -73,8 +73,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 codex mcp add sp --env PYTHONUTF8=1 -- uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 ```
 
-Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.0`:
-`git+https://github.com/proovcme/sp-mcp.git@v0.2.0`.
+Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.1`:
+`git+https://github.com/proovcme/sp-mcp.git@v0.2.1`.
 
 Для разработки:
 
@@ -105,10 +105,14 @@ uv run sp-mcp sources
 ```bash
 uv run sp-mcp web
 # или из опубликованной версии:
-uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.0 sp-mcp web
+uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.1 sp-mcp web
 ```
 
 Откройте **http://127.0.0.1:8767/**. Это интерфейс той же SQLite-базы, которой пользуется MCP.
+
+Публичный интерфейс: **[locia.work/sp](https://locia.work/sp/)**.
+На VPS используется отдельная серверная база нормативов, без частных проектов.
+[Развёртывание и границы подключения к «Увязке»](docs/VPS.md).
 
 - Поиск по названиям и текстовым фрагментам; режимы «По понятиям и словам» и «По словам и словоформам» не запускают модель.
 - Русская морфология Snowball, BM25, словарь связанных инженерных терминов и обработка близких написаний.

@@ -29,7 +29,10 @@ def test_contents_ignores_abbreviated_front_toc_and_preserves_appendix_numbering
       <div>1. ОБЛАСТЬ ПРИМЕНЕНИЯ</div><div>2. МЕТОД РАСЧЕТА</div>
       <div>3. ЗАЩИТНОЕ ЗАЗЕМЛЕНИЕ.</div>
       <div>2.1 Расход определяется по формуле [ИЗОБРАЖЕНИЕ]</div>
-      <div>Приложение А</div><div>1 Исходные данные</div><div>2 Результаты</div>""")
+      <div>Приложение А</div><div>1 Исходные данные</div><div>2 Результаты</div>
+      <div>1 - 14 - элементы на схеме</div><div>3 группе помещений</div>
+      <div>А.1 Исходные условия</div><div>А.1.1 Расчетная схема</div>
+      <div>А.1.1.1 Учебное требование к элементу</div>""")
     doc = service.store.save(raw, parse_document(raw))
     items = service.contents(doc["snapshot_id"])["items"]
     assert [item["title"] for item in items] == [
@@ -39,6 +42,8 @@ def test_contents_ignores_abbreviated_front_toc_and_preserves_appendix_numbering
         "Приложение А",
         "1 Исходные данные",
         "2 Результаты",
+        "А.1 Исходные условия",
+        "А.1.1 Расчетная схема",
     ]
     for item in items:
         assert item["start"] == doc["text"].rfind(item["title"])

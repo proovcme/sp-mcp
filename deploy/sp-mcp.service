@@ -1,0 +1,41 @@
+[Unit]
+Description=SP MCP normative search web service
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=sp-mcp
+Group=sp-mcp
+WorkingDirectory=/opt/sp-mcp
+Environment=PYTHONUTF8=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SP_MCP_DATA_DIR=/var/lib/sp-mcp
+ExecStart=/opt/sp-mcp/venv/bin/python -m sp_mcp web --host 127.0.0.1 --port 62813
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=sp-mcp
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryHigh=320M
+MemoryMax=448M
+MemorySwapMax=64M
+CPUQuota=75%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

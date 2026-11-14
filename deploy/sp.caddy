@@ -1,0 +1,27 @@
+# Import inside the existing HTTPS site block, before its fallback handle.
+redir /sp /sp/ 308
+handle_path /sp/* {
+    request_body {
+        max_size 64KB
+    }
+    header {
+        -Server
+        Cache-Control "no-store"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        X-Frame-Options "DENY"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+    # Public normative data only. The MCP transport and project bridge are not published.
+    @sp_public path / /health /assets/app.js /assets/style.css /assets/mark.svg /api/ui-config /api/sources /api/search /api/browse /api/open /api/read /api/outline /api/read_clause /api/search_document /api/table /api/check /api/batch_check /api/compare /api/library /api/document /api/contents /api/verifications /api/search_status /api/prepare_search
+    handle @sp_public {
+        reverse_proxy 127.0.0.1:62813 {
+            transport http {
+                response_header_timeout 180s
+            }
+        }
+    }
+    handle {
+        respond 404
+    }
+}

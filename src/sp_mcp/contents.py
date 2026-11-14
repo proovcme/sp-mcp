@@ -22,15 +22,17 @@ def document_contents(document):
             if not line or len(line) > 210:
                 continue
             number, level, kind = None, 0, "heading"
-            section = re.match(r"^(\d+(?:\.\d+){0,2})\.?\s+(.+)$", line)
+            section = re.match(r"^((?:[А-ЯA-ZЁ]\.)?\d+(?:\.\d+){0,2})\.?\s+(.+)$", line)
             appendix = re.match(r"^Приложение\s+([А-ЯA-Z0-9]+)(?:[.\s]|$)", line, re.I)
             if appendix:
                 number, kind = appendix[1], "appendix"
             elif section:
                 number, title = section[1], section[2]
-                level = number.count(".")
+                numeric_part = re.sub(r"^[А-ЯA-ZЁ]\.", "", number)
+                level = numeric_part.count(".") + (numeric_part != number)
                 if (
-                    level > 1
+                    numeric_part.count(".") > 1
+                    or not re.match(r"[А-ЯA-ZЁ]", title)
                     or excluded.match(title)
                     or (title.endswith((".", ";", ":")) and not title.isupper())
                     or re.search(

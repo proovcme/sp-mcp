@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sp-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Evidence-first search and dated verification of Russian construction standards"
 readme = "README.md"
 license = "MIT"
