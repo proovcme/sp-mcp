@@ -118,7 +118,7 @@ def bridge_call(name, arguments):
             raise ValueError
     except ValueError as exc:
         raise NormsError("UVYAZKA_CONFIG_ERROR", "SP_MCP_UVYAZKA_ARGS must be a JSON string array") from exc
-    if name not in {"list_projects", "save_structure_analysis", "get_project_structure"}:
+    if name not in {"list_projects", "find_documents", "save_structure_analysis", "get_project_structure"}:
         raise NormsError(
             "UVYAZKA_METHOD_NOT_ALLOWED", "This bridge exposes only registered project/link operations"
         )

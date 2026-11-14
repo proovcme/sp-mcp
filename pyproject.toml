@@ -4,12 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sp-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-first search and dated verification of Russian construction standards"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.2,<3", "beautifulsoup4>=4.13,<5", "platformdirs>=4,<5", "truststore>=0.10,<1", "pypdf>=6,<7"]
+dependencies = [
+    "mcp>=2.2,<3",
+    "beautifulsoup4>=4.13,<5",
+    "platformdirs>=4,<5",
+    "truststore>=0.10,<1",
+    "pypdf>=6,<7",
+    "snowballstemmer>=3,<4",
+]
 
 [project.scripts]
 sp-mcp = "sp_mcp.cli:main"

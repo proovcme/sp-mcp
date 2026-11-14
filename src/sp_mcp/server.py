@@ -49,16 +49,34 @@ def create_server(config):
         """Implemented sources, coverage limits, local index counts and planned adapters."""
         return service.sources()
 
+    @tool(local)
+    def sp_search_status() -> dict:
+        """Coverage and progress of the shared word/concept index and optional local embedding index. No model is started."""
+        return service.search_status()
+
+    @tool(write)
+    def sp_prepare_search() -> dict:
+        """Explicitly start or resume optional local embedding indexing in the background.
+        Requires a locally configured worker. Default concept/word search needs no model and no preparation.
+        """
+        return service.prepare_search()
+
     @tool(read)
     def sp_search_documents(
-        query: str, limit: int = 20, page: int = 1, online: bool = True, refresh: bool = False
+        query: str,
+        limit: int = 20,
+        page: int = 1,
+        online: bool = True,
+        refresh: bool = False,
+        mode: str = "concept",
     ) -> dict:
         """Search by full designation or words. Returns candidates, never confirmed applicability.
         Online search queries official SP/GOST metadata and bounded MegaNorm SP catalogues.
-        Local prefix full-text search covers previously opened snapshots only; no semantic search.
+        Default concept mode uses Russian morphology, BM25, spelling corrections and a curated lexicon, no model.
+        Optional hybrid/semantic modes require a separately configured local embedding index; no generation API.
         Page is the official search page; inspect source_errors and search coverage.
         """
-        return service.search(query, limit, page, online, refresh)
+        return service.search(query, limit, page, online, refresh, mode)
 
     @tool(read)
     def sp_browse_catalog(
@@ -91,6 +109,13 @@ def create_server(config):
     def sp_document_outline(snapshot_id: str, offset: int = 0, limit: int = 40) -> dict:
         """Literal block/paragraph/table index with text offsets; not inferred official headings."""
         return service.outline(snapshot_id, offset, limit)
+
+    @tool(local)
+    def sp_document_contents(snapshot_id: str) -> dict:
+        """Automatically detected sections/subsections/appendices with exact source text offsets.
+        Repeated contents/body headings resolve to the later body occurrence. Not a certified official TOC.
+        """
+        return service.contents(snapshot_id)
 
     @tool(local)
     def sp_read_clause(snapshot_id: str, number: str, expected_sha256: str | None = None) -> dict:

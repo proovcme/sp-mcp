@@ -6,8 +6,10 @@ from urllib.parse import urlencode, urljoin
 from .config import Config
 from .errors import NormsError
 from .identity import clean, designation
+from .linguistics import relevance, stems
 from .network import Network, validate_url
 from .parsers import parse_candidates, parse_document, soup_for
+from .retrieval import Retrieval
 from .storage import Store
 from .verification import verify
 
@@ -29,6 +31,7 @@ class Service:
         self.config = config
         self.store = Store(config.root)
         self.network = network or Network(config)
+        self.retrieval = Retrieval(self.store)
 
     def sources(self):
         return {
@@ -54,8 +57,16 @@ class Service:
                 },
             ],
             "local": self.store.stats(),
-            "search_modes": ["official_catalog", "local_prefix_full_text"],
-            "semantic_search": False,
+            "search_modes": [
+                "official_catalog",
+                "russian_morphology_bm25",
+                "concept_dictionary",
+                "optional_local_embeddings",
+            ],
+            "semantic_search": {
+                "default": "concept_dictionary_without_model",
+                "optional_embeddings": self.retrieval.status(),
+            },
             "planned_adapters": ["Minstroy", "MChS", "Rospotrebnadzor", "official legal publication"],
         }
 
@@ -92,12 +103,14 @@ class Service:
         url = "https://new.gostinfo.ru/catalog?" + urlencode({"catalog": category, "q": query, "page": page})
         return self._catalog(url, refresh)
 
-    def search(self, query, limit=20, page=1, online=True, refresh=False):
+    def search(self, query, limit=20, page=1, online=True, refresh=False, mode="concept"):
         query = clean(query)
         if not query or len(query) > 300:
             raise NormsError("INVALID_ARGUMENT", "query must contain 1..300 characters")
         bound(limit, 1, 50, "limit")
         bound(page, 1, 1000, "page")
+        if mode not in {"concept", "lexical", "hybrid", "semantic"}:
+            raise NormsError("INVALID_ARGUMENT", "Unknown search mode")
         errors, remote, provenance = [], [], []
         code = designation(query)
         if online:
@@ -108,36 +121,154 @@ class Service:
             )
             for category in categories:
                 try:
-                    result = self._official_search(code or query, category, page, refresh)
+                    result = self._official_search(code or query, category, 1, refresh)
                     remote.extend(result["items"])
                     provenance.append(result["provenance"])
                 except NormsError as exc:
                     errors.append({"source": "gostinfo", **exc.payload()})
-            # СП catalogue contains all base СП titles in two pages; revisions are followed explicitly.
-            if page == 1 and (not code or code.startswith("СП ")):
+            # The official q parameter is literal substring matching, not morphology.
+            if not code:
+                terms = sorted(set(stems(query)), key=len, reverse=True)
+                if terms and terms[0] != query.casefold():
+                    for category in categories:
+                        for p in range(1, 4):
+                            try:
+                                result = self._official_search(terms[0], category, p, refresh)
+                                remote.extend(result["items"])
+                                provenance.append(result["provenance"])
+                                if not result["next_urls"]:
+                                    break
+                            except NormsError as exc:
+                                errors.append({"source": "gostinfo", **exc.payload()})
+                                break
+            if not code or code.startswith("СП "):
                 try:
                     for p in range(2):
                         self.browse(page=p, refresh=refresh)
                 except NormsError as exc:
                     errors.append({"source": "meganorm", **exc.payload()})
-        local = self.store.candidates(code or query, limit=limit)
+            # Fire-safety SPs are often filed under the approving MChS order, not the base SP rubric.
+            if any(term.startswith(("пожар", "туш", "дым", "огнетуш")) for term in stems(query)):
+                try:
+                    self._catalog("https://meganorm.ru/mega_doc/fire/normy/normy_0.html", refresh)
+                except NormsError as exc:
+                    errors.append({"source": "meganorm", **exc.payload()})
+        local = self.store.candidates(code or query, limit=150)
         combined = {item["url"]: item for item in remote + local}
         values = list(combined.values())
         if code:
-            values.sort(key=lambda item: (item["code"] != code, item["change_number"] is not None))
-        text_hits = self.store.search_text(query, limit, (page - 1) * limit)
+            values = [item for item in values if item["code"] == code]
+        values.sort(
+            key=lambda item: (
+                item["code"] != code if code else -relevance(query, item["title"]),
+                item.get("change_number") is not None,
+            )
+        )
+        hydrated = []
+        if online and not code and page == 1:
+            topic = max(stems(query), key=len, default="")
+            topical = [
+                item
+                for item in values
+                if item["source"] == "meganorm"
+                and item.get("change_number") is None
+                and topic in stems(item["title"])
+            ]
+            if "газов" in stems(query):
+                topical = [
+                    item
+                    for item in topical
+                    if not ({"водян", "пенн", "порошков", "аэрозольн"} & set(stems(item["title"])))
+                ]
+
+            def year(item):
+                years = re.findall(r"(?:19|20)\d{2}", item["code"])
+                return int(years[-1]) if years else 0
+
+            topical.sort(key=lambda item: ("проектирован" not in stems(item["title"]), -year(item)))
+            for item in topical[:2]:
+                try:
+                    summary = self.open(item["url"], latest_revision=True)
+                    hydrated.append(summary["snapshot_id"])
+                except NormsError as exc:
+                    errors.append({"source": "meganorm", **exc.payload()})
+        retrieval = self.retrieval.search(query, mode=mode if not code else "lexical", limit=limit * 3)
+        text_hits, seen_hits = [], set()
+        for item in retrieval["items"]:
+            if code and item["code"] != code:
+                continue
+            if item["kind"] == "text" and item["code"] not in seen_hits:
+                text_hits.append(item | {"excerpt": item["text"], "query": query})
+                seen_hits.add(item["code"])
+            elif item["kind"] == "title" and not any(v["url"] == item["url"] for v in values):
+                values.append(
+                    {
+                        "url": item["url"],
+                        "code": item["code"],
+                        "title": item["title"],
+                        "source": item["source"],
+                        "change_number": None,
+                        "match_status": "candidate",
+                    }
+                )
+
+        def catalogue_cancelled(item):
+            return bool(
+                re.search(re.escape(item["code"]) + r"\s+(?:Отменен|Заменен|Утратил)", item["title"], re.I)
+            )
+
+        cancelled_codes = {item["code"] for item in values if catalogue_cancelled(item)}
+        values.sort(
+            key=lambda item: (
+                item["code"] in cancelled_codes,
+                not item["code"].startswith(("СП ", "ГОСТ")),
+                item["code"] != code if code else -relevance(query, item["title"]),
+                item.get("change_number") is not None,
+            )
+        )
+        for item in values:
+            if item["code"] in cancelled_codes:
+                item["catalogue_warning"] = "cancelled_or_replaced"
+        text_hits.sort(
+            key=lambda item: (
+                item["code"] in cancelled_codes,
+                not item["code"].startswith(("СП ", "ГОСТ")),
+                -item.get("word_coverage", 0),
+            )
+        )
+        related = []
+        if not code:
+            direct_text_codes = {item["code"] for item in text_hits if item.get("word_coverage", 0) >= 1}
+            primary = []
+            for item in values:
+                (
+                    primary
+                    if relevance(query, item["title"]) >= 1 or item["code"] in direct_text_codes
+                    else related
+                ).append(item)
+            values = primary
+        start = (page - 1) * limit
         return {
             "status": "partial" if errors else "ok",
             "query": query,
             "page": page,
-            "items": values[:limit],
-            "text_hits": text_hits,
+            "items": values[start : start + limit],
+            "text_hits": text_hits[:limit],
+            "related_items": related[:limit],
             "source_errors": errors,
             "search_provenance": provenance,
-            "more_results_possible": len(values) > limit,
-            "coverage": "Bounded live official catalogues and indexed local sources; not all Russian norms.",
+            "more_results_possible": len(values) > start + limit,
+            "retrieval": {k: v for k, v in retrieval.items() if k != "items"},
+            "hydrated_snapshots": hydrated,
+            "coverage": "Discovered catalogue titles and saved source fragments; not the complete Russian normative corpus.",
             "match_status": "candidate" if values or text_hits else "not_found_in_searched_sources",
         }
+
+    def search_status(self):
+        return self.retrieval.status()
+
+    def prepare_search(self):
+        return self.retrieval.start()
 
     @staticmethod
     def summary(document):
@@ -386,3 +517,27 @@ class Service:
             "right_provenance": right["provenance"],
             "limitations": ["Literal extraction diff; not an official amendment or legal interpretation."],
         }
+
+    def library(self, query="", limit=30, offset=0):
+        bound(limit, 1, 100, "limit")
+        bound(offset, 0, 1000000, "offset")
+        return self.store.library(query, limit, offset)
+
+    def document(self, snapshot_id):
+        doc = self.store.get(snapshot_id)
+        return self.summary(doc) | {
+            "saved_editions": self.store.library(limit=100, code=doc["code"])["items"],
+            "last_verification": next(
+                iter(self.store.verification_history(snapshot_id, limit=1)["items"]), None
+            ),
+        }
+
+    def contents(self, snapshot_id):
+        from .contents import document_contents
+
+        return document_contents(self.store.get(snapshot_id))
+
+    def verifications(self, snapshot_id=None, limit=30, offset=0):
+        bound(limit, 1, 100, "limit")
+        bound(offset, 0, 1000000, "offset")
+        return self.store.verification_history(snapshot_id, limit, offset)

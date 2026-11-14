@@ -165,17 +165,18 @@ class Store:
         return payload
 
     def candidates(self, query, limit=20, source=None):
-        tokens = query.casefold().replace("\u00a0", " ").split()
+        from .linguistics import relevance
+
         with self.db() as db:
             rows = db.execute(
                 "SELECT * FROM candidates" + (" WHERE source=?" if source else ""),
                 (source,) if source else (),
             ).fetchall()
-        hits = [
-            json.loads(row["payload"])
+        scored = [
+            (relevance(query, row["title"] + " " + (row["code"] or "")), json.loads(row["payload"]))
             for row in rows
-            if all(token in (row["title"] + " " + (row["code"] or "")).casefold() for token in tokens)
         ]
+        hits = [item for score, item in sorted(scored, key=lambda x: -x[0]) if score > 0]
         return hits[:limit]
 
     def search_text(self, query, limit=10, offset=0):
@@ -221,3 +222,49 @@ class Store:
         if sha(dump(report).encode())[:32] != ident:
             raise NormsError("INTEGRITY_ERROR", "Saved verification payload was modified")
         return report | {"verification_id": ident}
+
+    def library(self, query="", limit=30, offset=0, code=None):
+        """Latest extraction per URL, from the same database used by MCP; no network."""
+        with self.db() as db:
+            rows = db.execute("""SELECT s.id,s.payload,MAX(o.checked_at) checked_at
+                FROM snapshots s JOIN observations o ON o.snapshot_id=s.id
+                GROUP BY s.id ORDER BY checked_at DESC,s.id""").fetchall()
+        seen, items = set(), []
+        for row in rows:
+            doc = json.loads(row["payload"])
+            # Pre-release development extractions lack the immutable extraction manifest.
+            if not doc.get("provenance", {}).get("extraction_sha256"):
+                continue
+            if code and doc.get("code") != code:
+                continue
+            if any(
+                token not in (doc["title"] + " " + doc["code"]).casefold()
+                for token in query.casefold().split()
+            ):
+                continue
+            url = doc["provenance"]["source_url"]
+            if url in seen:
+                continue
+            seen.add(url)
+            doc["provenance"]["checked_at"] = row["checked_at"]
+            items.append({k: v for k, v in doc.items() if k not in {"text", "blocks", "tables", "images"}})
+        return {
+            "items": items[offset : offset + limit],
+            "total": len(items),
+            "next_offset": offset + limit if offset + limit < len(items) else None,
+        }
+
+    def verification_history(self, snapshot_id=None, limit=30, offset=0):
+        with self.db() as db:
+            where = " WHERE json_extract(payload,'$.snapshot_id')=?" if snapshot_id else ""
+            args = (snapshot_id,) if snapshot_id else ()
+            total = db.execute("SELECT count(*) FROM verifications" + where, args).fetchone()[0]
+            rows = db.execute(
+                "SELECT id FROM verifications" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*args, limit, offset),
+            ).fetchall()
+        return {
+            "items": [self.verification(row[0]) for row in rows],
+            "total": total,
+            "next_offset": offset + limit if offset + limit < total else None,
+        }
