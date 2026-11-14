@@ -12,7 +12,7 @@ SQLite-базу. С локальной базой компьютера она а
 uv export --locked --no-dev --no-emit-project --no-hashes --output-file requirements.txt
 # На сервере, после передачи wheel и requirements.txt:
 python3 -m venv /opt/sp-mcp/venv
-/opt/sp-mcp/venv/bin/pip install -r /opt/sp-mcp/requirements.txt /opt/sp-mcp/sp_mcp-0.2.4-py3-none-any.whl
+/opt/sp-mcp/venv/bin/pip install -r /opt/sp-mcp/requirements.txt /opt/sp-mcp/sp_mcp-0.2.5-py3-none-any.whl
 useradd --system --home-dir /var/lib/sp-mcp --shell /usr/sbin/nologin sp-mcp
 install -m 0644 deploy/sp-mcp.service /etc/systemd/system/sp-mcp.service
 systemctl daemon-reload

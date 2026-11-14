@@ -16,6 +16,7 @@ import threading
 from pathlib import Path
 
 from .errors import NormsError
+from .identity import candidate_code, designation
 from .linguistics import concepts, stems
 from .storage import dump, now, sha
 
@@ -167,9 +168,11 @@ class Retrieval:
 
     def sync(self):
         entries = []
+        self.identity_issues = []
         with self.store.db() as db:
             candidates = [json.loads(row[0]) for row in db.execute("SELECT payload FROM candidates")]
         for item in candidates:
+            item["code"] = candidate_code(item)
             label = item["title"].split("Открыть карточку")[0]
             if not item.get("change_number"):
                 entries.append(
@@ -194,13 +197,36 @@ class Retrieval:
                 doc = self.store.get(item["snapshot_id"])
             except NormsError:
                 continue
+            expected = designation(doc.get("fields", {}).get("Обозначение", doc["title"]))
+            if expected and expected != doc["code"]:
+                self.identity_issues.append(
+                    {
+                        "snapshot_id": doc["snapshot_id"],
+                        "url": doc["provenance"]["source_url"],
+                        "reason": "cached_identity_requires_reopen",
+                        "expected_code": expected,
+                    }
+                )
+                continue
+            lead = None
             for block in doc["blocks"]:
-                match = re.match(r"^((?:[А-ЯA-Z]\.)?\d+(?:\.\d+)+)\s", block["text"])
+                numbered = r"^((?:[А-ЯA-Z]\.)?\d+(?:\.\d+)+)(?:\.?\s)"
+                match = re.match(numbered, block["text"])
                 heading = match[1] if match else None
+                is_list = bool(re.match(r"^(?:[-–—]|[а-яa-z]\))\s", block["text"], re.I))
+                if not is_list and not block["text"].startswith("("):
+                    lead = block if block["text"].endswith(":") else None
                 for local_offset in range(0, len(block["text"]), 550):
                     text = block["text"][local_offset : local_offset + 650]
                     if len(text) < 40:
                         continue
+                    start, end = block["start"] + local_offset, block["start"] + local_offset + len(text)
+                    clause = heading
+                    if is_list and local_offset == 0 and lead and end - lead["start"] <= 2000:
+                        start = lead["start"]
+                        text = doc["text"][start:end]
+                        literal_number = re.match(numbered, text)
+                        clause = literal_number[1] if literal_number else None
                     entries.append(
                         {
                             "kind": "text",
@@ -208,10 +234,11 @@ class Retrieval:
                             "snapshot_id": doc["snapshot_id"],
                             "url": doc["provenance"]["source_url"],
                             "title": doc["title"],
-                            "clause": heading,
-                            "start": block["start"] + local_offset,
-                            "end": block["start"] + local_offset + len(text),
+                            "clause": clause,
+                            "start": start,
+                            "end": end,
                             "text": text,
+                            "scope_exclusion": bool(re.search(r"\bне\s+распространя", text, re.I)),
                             "sha256": doc["provenance"]["sha256"],
                             "source": doc["source"],
                         }
@@ -316,7 +343,7 @@ class Retrieval:
         with self.store.db() as db:
             db.execute("INSERT OR REPLACE INTO retrieval_meta VALUES (?,?)", ("job", dump(payload)))
 
-    def search(self, query, mode="concept", limit=20):
+    def search(self, query, mode="concept", limit=20, preferred_codes=None):
         self.sync()
         tokens = set(stems(query))
         query_groups = concepts(query) if mode == "concept" else [{t} for t in tokens]
@@ -337,12 +364,32 @@ class Retrieval:
                                     corrections[term] = matches[0]
                 expanded = set().union(*query_groups)
                 expression = " OR ".join('"' + token + '"' for token in sorted(expanded))
-                rows = db.execute(
-                    """SELECT s.id,s.payload,bm25(retrieval_fts) rank FROM retrieval_fts f
-                    JOIN retrieval_segments s ON s.id=f.id WHERE retrieval_fts MATCH ? AND s.active=1
-                    ORDER BY rank LIMIT 150""",
-                    (expression,),
-                ).fetchall()
+                preferred = tuple(dict.fromkeys(preferred_codes or ()))[:50]
+                ordering = (
+                    "CASE WHEN json_extract(s.payload,'$.code') IN ("
+                    + ",".join("?" for _ in preferred)
+                    + ") THEN 0 ELSE 1 END,"
+                    if preferred
+                    else ""
+                )
+
+                def matching(terms):
+                    return db.execute(
+                        """SELECT s.id,s.payload,bm25(retrieval_fts) rank FROM retrieval_fts f
+                        JOIN retrieval_segments s ON s.id=f.id WHERE retrieval_fts MATCH ? AND s.active=1
+                        ORDER BY """
+                        + ordering
+                        + " rank LIMIT 150",
+                        (terms, *preferred),
+                    ).fetchall()
+
+                required = " AND ".join(
+                    "(" + " OR ".join('"' + t + '"' for t in sorted(group)) + ")" for group in query_groups
+                )
+                rows = matching(required)
+                if len(query_groups) > 1 and len(rows) < 150:
+                    seen = {r["id"] for r in rows}
+                    rows += [r for r in matching(expression) if r["id"] not in seen][: 150 - len(rows)]
                 literal = [(r["id"], json.loads(r["payload"])) for r in rows]
 
                 def coverage(item):
@@ -405,4 +452,5 @@ class Retrieval:
             "index": self.status(),
             "model_used": mode in {"semantic", "hybrid"} and bool(semantic),
             "query_corrections": corrections,
+            "identity_issues": self.identity_issues[:10],
         }

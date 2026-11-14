@@ -5,8 +5,16 @@ from urllib.parse import urlencode, urljoin
 
 from .config import Config
 from .errors import NormsError
-from .identity import clean, designation
-from .linguistics import catalog_queries, relevance, stems, topic_relevance
+from .identity import clean, designation, prefer_candidate
+from .linguistics import (
+    catalog_anchor,
+    catalog_queries,
+    match_span,
+    relevance,
+    stems,
+    subject_compatible,
+    topic_relevance,
+)
 from .network import Network, validate_url
 from .parsers import parse_candidates, parse_document, soup_for
 from .presentation import reading_blocks, table_caption
@@ -78,6 +86,7 @@ class Service:
         if cached and not refresh:
             checked = datetime.fromisoformat(cached["provenance"]["checked_at"])
             if datetime.now(timezone.utc) - checked < timedelta(hours=24):
+                self.store.add_candidates(cached["items"])
                 return cached
         fetched = self.network.fetch(url)
         items = parse_candidates(fetched)
@@ -117,6 +126,7 @@ class Service:
             raise NormsError("INVALID_ARGUMENT", "Unknown search mode")
         errors, remote, provenance = [], [], []
         code = designation(query)
+        anchor = catalog_anchor(query)
         if online:
             categories = (
                 ["sp"]
@@ -132,12 +142,11 @@ class Service:
                     errors.append({"source": "gostinfo", **exc.payload()})
             # The official q parameter is literal substring matching, not morphology.
             if not code:
-                terms = sorted(set(stems(query)), key=len, reverse=True)
-                if terms and terms[0] != query.casefold():
+                if anchor and anchor != query.casefold():
                     for category in categories:
                         for p in range(1, 4):
                             try:
-                                result = self._official_search(terms[0], category, p, refresh)
+                                result = self._official_search(anchor, category, p, refresh)
                                 remote.extend(result["items"])
                                 provenance.append(result["provenance"])
                                 if not result["next_urls"]:
@@ -147,6 +156,8 @@ class Service:
                                 break
                 if mode != "lexical":
                     for expanded in catalog_queries(query):
+                        if expanded == anchor:
+                            continue
                         try:
                             result = self._official_search(expanded, "sp", 1, refresh)
                             remote.extend(result["items"])
@@ -166,13 +177,21 @@ class Service:
                 except NormsError as exc:
                     errors.append({"source": "meganorm", **exc.payload()})
         local = self.store.candidates(code or query, limit=150)
-        combined = {item["url"]: item for item in remote + local}
+        if not code and anchor:
+            local += self.store.candidates(anchor, limit=150)
+        combined = {}
+        for item in remote + local:
+            combined[item["url"]] = prefer_candidate(combined.get(item["url"]), item)
         values = list(combined.values())
         if code:
             values = [item for item in values if item["code"] == code]
-        topic_codes = {
-            item["code"] for item in values if mode != "lexical" and topic_relevance(query, item["title"])
-        }
+        topic_scores = {}
+        for item in values:
+            score = topic_relevance(query, item["title"]) if mode != "lexical" else 0
+            if score:
+                topic_scores[item["code"]] = max(topic_scores.get(item["code"], 0), score)
+        topic_codes = set(topic_scores)
+        initial_status = validity_index(self.store, self.config.freshness_days)
         for matched_code in topic_codes:
             for candidate in self.store.candidates(matched_code, limit=30):
                 if candidate["code"] == matched_code and candidate["url"] not in combined:
@@ -186,13 +205,18 @@ class Service:
         )
         hydrated = []
         if online and not code and page == 1:
-            topic = max(stems(query), key=len, default="")
+            topic = anchor
             topical = [
                 item
                 for item in values
                 if item["source"] == "meganorm"
                 and item.get("change_number") is None
+                and designation(item["title"]) == item["code"]
                 and (topic in stems(item["title"]) or item["code"] in topic_codes)
+                and (
+                    include_inactive
+                    or not observed_validity(initial_status, item["code"])["hidden_by_default"]
+                )
             ]
             if "газов" in stems(query):
                 topical = [
@@ -207,29 +231,68 @@ class Service:
 
             topical.sort(
                 key=lambda item: (
-                    item["code"] not in topic_codes,
+                    -topic_scores.get(item["code"], 0),
                     bool(re.search(r"методические рекомендации|письмо|проект свода", item["title"], re.I)),
                     "проектирован" not in stems(item["title"]),
                     -year(item),
                 )
             )
             hydrated_codes = set()
+            attempted_urls = set()
             attempts = 0
-            for item in topical:
-                if item["code"] in hydrated_codes:
+            while topical:
+                item = topical.pop(0)
+                if item["code"] in hydrated_codes or item["url"] in attempted_urls:
                     continue
                 if attempts >= 3:
                     break
                 attempts += 1
+                attempted_urls.add(item["url"])
                 try:
                     summary = self.open(item["url"], latest_revision=True)
+                    if summary["code"] != item["code"]:
+                        raise NormsError(
+                            "DISCOVERY_IDENTITY_MISMATCH", "Discovery link points to another document"
+                        )
                     hydrated.append(summary["snapshot_id"])
+                    values.append(
+                        summary
+                        | {"url": summary["provenance"]["source_url"], "match_status": "loaded_source"}
+                    )
                     hydrated_codes.add(item["code"])
                     if len(hydrated_codes) == 2:
                         break
+                    # Opening one source may reveal the next profile document on a cold database.
+                    for matched in sorted(topic_codes, key=lambda c: -topic_scores[c])[:5]:
+                        if matched in hydrated_codes:
+                            continue
+                        if (
+                            not include_inactive
+                            and observed_validity(initial_status, matched)["hidden_by_default"]
+                        ):
+                            continue
+                        for candidate in self.store.candidates(matched, limit=30):
+                            if (
+                                candidate["code"] == matched
+                                and candidate["source"] == "meganorm"
+                                and candidate.get("change_number") is None
+                                and designation(candidate["title"]) == matched
+                                and candidate["url"] not in attempted_urls
+                            ):
+                                topical.append(candidate)
+                    topical.sort(
+                        key=lambda candidate: (-topic_scores.get(candidate["code"], 0), -year(candidate))
+                    )
                 except NormsError as exc:
                     errors.append({"source": "meganorm", **exc.payload()})
-        retrieval = self.retrieval.search(query, mode=mode if not code else "lexical", limit=limit * 3)
+        preferred = [
+            c
+            for c in topic_scores
+            if include_inactive or not observed_validity(initial_status, c)["hidden_by_default"]
+        ]
+        retrieval = self.retrieval.search(
+            query, mode=mode if not code else "lexical", limit=limit * 3, preferred_codes=preferred
+        )
         text_hits = []
         for item in retrieval["items"]:
             if code and item["code"] != code:
@@ -251,7 +314,10 @@ class Service:
         text_hits.sort(
             key=lambda item: (
                 -item.get("word_coverage", 0),
+                bool(item.get("scope_exclusion")),
+                -relevance(query, item["text"]),
                 not bool(item.get("clause")),
+                match_span(query, item["text"]),
                 len(item["text"]) < 90,
                 -item.get("score", 0),
             )
@@ -261,7 +327,7 @@ class Service:
             unique_hits.setdefault(item["code"], item)
         text_hits = list(unique_hits.values())
 
-        status_index = validity_index(self.store, self.config.freshness_days)
+        status_index = validity_index(self.store, self.config.freshness_days) if hydrated else initial_status
         cancelled_codes = {code for code, status in status_index.items() if status["hidden_by_default"]}
         excluded_codes = {item["code"] for item in values + text_hits if item["code"] in cancelled_codes}
         for item in values + text_hits:
@@ -272,7 +338,7 @@ class Service:
         values.sort(
             key=lambda item: (
                 item["code"] in cancelled_codes,
-                item["code"] not in topic_codes,
+                -topic_scores.get(item["code"], 0),
                 not item["code"].startswith(("СП ", "ГОСТ")),
                 item["code"] != code if code else -relevance(query, item["title"]),
                 item.get("change_number") is not None,
@@ -284,14 +350,23 @@ class Service:
         text_hits.sort(
             key=lambda item: (
                 item["code"] in cancelled_codes,
-                item["code"] not in topic_codes,
+                -topic_scores.get(item["code"], 0),
                 not item["code"].startswith(("СП ", "ГОСТ")),
                 -item.get("word_coverage", 0),
             )
         )
-        related = []
+        related, related_text = [], []
         if not code:
-            direct_text_codes = {item["code"] for item in text_hits if item.get("word_coverage", 0) >= 1}
+            primary_text = []
+            for item in text_hits:
+                if (
+                    item.get("word_coverage", 0) >= 1 or item.get("similarity", 0) >= 0.5
+                ) and subject_compatible(query, item["title"], item["text"]):
+                    primary_text.append(item)
+                else:
+                    related_text.append(item)
+            text_hits = primary_text
+            direct_text_codes = {item["code"] for item in text_hits}
             primary = []
             for item in values:
                 (
@@ -302,6 +377,35 @@ class Service:
                     else related
                 ).append(item)
             values = primary
+
+            # Pagination counts documents, not repeated source links or amendment cards.
+            def document_cards(items):
+                groups = {}
+                for item in items:
+                    groups.setdefault(item["code"], []).append(item)
+                cards = []
+                for group in groups.values():
+                    best = min(
+                        group,
+                        key=lambda item: (
+                            not bool(item.get("snapshot_id")),
+                            item.get("change_number") is not None,
+                            item["source"] != "gostinfo",
+                            -len(item["title"]),
+                        ),
+                    )
+                    cards.append(
+                        best
+                        | {
+                            "discovered_sources": [
+                                {key: item.get(key) for key in ("url", "source", "title", "change_number")}
+                                for item in group[:20]
+                            ]
+                        }
+                    )
+                return cards
+
+            values, related = document_cards(values), document_cards(related)
         start = (page - 1) * limit
         return {
             "status": "partial" if errors else "ok",
@@ -310,11 +414,13 @@ class Service:
             "items": values[start : start + limit],
             "text_hits": text_hits[:limit],
             "related_items": related[:limit],
+            "related_text_hits": related_text[:limit],
             "source_errors": errors,
             "search_provenance": provenance,
             "more_results_possible": len(values) > start + limit,
             "retrieval": {k: v for k, v in retrieval.items() if k != "items"},
             "hydrated_snapshots": hydrated,
+            "discovery_anchor": anchor,
             "validity_filter": {
                 "include_inactive": include_inactive,
                 "excluded_count": 0 if include_inactive else len(excluded_codes),
@@ -345,6 +451,7 @@ class Service:
         use_cached = (
             cached
             and not refresh
+            and designation(cached.get("fields", {}).get("Обозначение", cached["title"])) == cached["code"]
             and (
                 datetime.now(timezone.utc) - datetime.fromisoformat(cached["provenance"]["checked_at"])
                 < timedelta(hours=1)

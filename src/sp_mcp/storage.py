@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .errors import NormsError
+from .identity import candidate_code, prefer_candidate
 
 
 def now():
@@ -130,6 +131,8 @@ class Store:
     def add_candidates(self, items):
         with self.db() as db:
             for item in items:
+                previous = db.execute("SELECT payload FROM candidates WHERE url=?", (item["url"],)).fetchone()
+                item = prefer_candidate(json.loads(previous[0]) if previous else None, item)
                 db.execute(
                     "INSERT OR REPLACE INTO candidates VALUES (?,?,?,?,?)",
                     (item["url"], item.get("code"), item["title"], item["source"], dump(item)),
@@ -177,7 +180,7 @@ class Store:
             for row in rows
         ]
         hits = [item for score, item in sorted(scored, key=lambda x: -x[0]) if score > 0]
-        return hits[:limit]
+        return [item | {"code": candidate_code(item)} for item in hits[:limit]]
 
     def search_text(self, query, limit=10, offset=0):
         import re

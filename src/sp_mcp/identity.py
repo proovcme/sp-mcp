@@ -1,10 +1,11 @@
 import re
 import unicodedata
 from datetime import date
+from urllib.parse import urlsplit
 
 CODE = re.compile(
     r"(?<![\w])(?:ГОСТ(?:\s+Р)?(?:\s+(?:ИСО|ISO|МЭК|IEC|EN|РВ))?(?:[/ ](?:МЭК|IEC))?"
-    r"|СП|СНиП|СанПиН|ГН|НПБ|ВСН|РД)\s*\d[\d.]*\s*(?:[-–—]\s*\d{2,4})?",
+    r"|СП|СНиП|СанПиН|ГН|НПБ|ВСН|РД)\s*\d[\d.]*\s*(?:[-–—]\s*\d{2,4}){0,2}",
     re.I,
 )
 
@@ -25,6 +26,27 @@ def designation(text):
 def change_number(text):
     match = re.search(r"^Изменени[ея]\s*(?:№|N(?:o|о)?)?\s*(\d+)\s+к", clean(text), re.I)
     return int(match[1]) if match else None
+
+
+def candidate_code(item):
+    """Re-read a cached discovery label without rewriting immutable document snapshots."""
+    return designation(item.get("label") or item.get("title", "")) or item["code"]
+
+
+def prefer_candidate(previous, incoming):
+    """Keep a catalogue observation intact when a bare cross-reference is discovered."""
+    if previous is None:
+        return incoming
+
+    def quality(item):
+        origin = urlsplit(item.get("discovered_from", ""))
+        official_listing = item.get("source") == "gostinfo" and origin.path.rstrip("/") == "/catalog"
+        title = clean(item.get("title", ""))
+        label = clean(item.get("label", ""))
+        rich = any(len(value) > len(candidate_code(item) or "") + 12 for value in (title, label))
+        return official_listing, rich, item.get("discovered_at", ""), len(title) + len(label)
+
+    return incoming if quality(incoming) >= quality(previous) else previous
 
 
 def parse_date(text):

@@ -4,7 +4,7 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from .identity import parse_date, status_value
+from .identity import candidate_code, parse_date, status_value
 
 INACTIVE = {"cancelled", "replaced", "not_yet_effective"}
 
@@ -45,6 +45,7 @@ def validity_index(store, freshness_days=7):
         reports = db.execute("SELECT payload FROM verifications ORDER BY created_at DESC").fetchall()
     for row in candidates:
         item = json.loads(row[0])
+        item["code"] = candidate_code(item)
         if item.get("authority") != "official_catalog" or item.get("change_number") is not None:
             continue
         match = re.match(
