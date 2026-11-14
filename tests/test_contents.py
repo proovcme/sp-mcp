@@ -55,6 +55,8 @@ def test_expanded_contents_has_deep_clauses_lettered_subpoints_and_search_pagina
     raw = fetched(f"""<title>СП 900.100.2099. Учебный документ</title>
         <div>1 Область применения</div><div>7.11.1 Заголовок печатного содержания</div>
         <div>1 ОБЛАСТЬ ПРИМЕНЕНИЯ</div><div>7.11 Учебный раздел</div>
+        <div>2. ТЕРМИНЫ И ОПРЕДЕЛЕНИЯ</div><div>2.1 Учебное требование.</div>
+        <div>1. Учебное примечание, не заголовок раздела.</div><div>7.11 Учебный раздел</div>
         <div>7.11.1 Синтетическое требование к учебной системе.</div><div>{long}</div>
         <div>а) учебное первое условие;</div><div>б) учебное второе условие.</div>
         <div>Приложение А</div><div>А.1.1.1 Глубокий учебный пункт.</div>""")
@@ -62,9 +64,11 @@ def test_expanded_contents_has_deep_clauses_lettered_subpoints_and_search_pagina
     result = service.contents(doc["snapshot_id"], expanded=True)
     items = result["items"]
     deep = next(i for i in items if i["number"] == "7.11.1.2")
+    assert any(i["title"] == "1 ОБЛАСТЬ ПРИМЕНЕНИЯ" and i["kind"] == "section" for i in items)
+    assert any(i["title"] == "2. ТЕРМИНЫ И ОПРЕДЕЛЕНИЯ" and i["kind"] == "section" for i in items)
     assert deep["title_truncated"] and deep["level"] == 3
     assert doc["text"][deep["start"] : deep["end"]] == long
-    assert all(i["parent_number"] == "7.11.1.2" for i in items if i["kind"] == "subpoint")
+    assert all(i["parent_number"] == "7.11.1.2" for i in items if i["number"] in {"а)", "б)"})
     assert next(i for i in items if i["number"] == "7.11.1")["title"].endswith("учебной системе.")
     assert any(i["number"] == "А.1.1.1" for i in items)
     found = service.contents(doc["snapshot_id"], expanded=True, query="контрольнаяфраза")

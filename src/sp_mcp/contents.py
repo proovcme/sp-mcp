@@ -142,9 +142,9 @@ def expanded_items(document, headings):
         if item["kind"] == "section" and item["scope"] == "main" and item["number"] == "1"
     ]
     body_start = main[0]["start"] if main else 0
-    special = {item["start"]: item for item in headings if item["kind"] in {"heading", "appendix"}}
+    special = {item["start"]: item for item in headings}
     selected = {("heading", item["title"]): item for item in special.values() if item["start"] < body_start}
-    scope, parent, parent_level = "main", None, 0
+    scope, parent, parent_level, chapter = "main", None, 0, None
     for block in document["blocks"]:
         if block["kind"] == "table":
             continue
@@ -158,7 +158,11 @@ def expanded_items(document, headings):
             if start in special:
                 item = dict(special[start])
                 if item["kind"] == "appendix":
-                    scope, parent = item["scope"], None
+                    scope, parent, chapter = item["scope"], None, None
+                elif item["kind"] == "section":
+                    parent, parent_level = item["number"], item["level"]
+                    if item["level"] == 0 and item["number"].isdigit():
+                        chapter = int(item["number"])
                 selected[(item["kind"], scope, item["number"], item["title"])] = item
                 continue
             match = re.match(r"^((?:[А-ЯA-ZЁ]\.)?\d+(?:\.\d+){0,7})([.)]?)\s+(.+)$", line)
@@ -167,10 +171,14 @@ def expanded_items(document, headings):
                 number, punctuation, title = match.groups()
                 if re.match(r"[-–—=]|\d+\s*[-–—]", title):
                     continue
-                if punctuation == ")":
+                enumeration = (
+                    number.isdigit() and chapter is not None and int(number) <= chapter and parent is not None
+                )
+                if punctuation == ")" or enumeration:
                     if parent is None:
                         continue
-                    number += ")"
+                    if punctuation == ")":
+                        number += ")"
                     kind, level, parent_number = "subpoint", parent_level + 1, parent
                 else:
                     numeric = re.sub(r"^[А-ЯA-ZЁ]\.", "", number)
