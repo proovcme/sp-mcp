@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sp": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/proovcme/sp-mcp.git", "sp-mcp"],
+      "env": {"PYTHONUTF8": "1"}
+    }
+  }
+}

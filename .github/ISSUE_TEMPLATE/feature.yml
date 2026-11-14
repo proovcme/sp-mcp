@@ -1,0 +1,16 @@
+name: Возможность или источник
+description: Предложить сценарий, новый источник или интеграцию
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Какую задачу нужно решить
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Источники и ожидаемый результат
+      description: Публичные ссылки, область покрытия и критерий проверки результата.
+    validations:
+      required: true

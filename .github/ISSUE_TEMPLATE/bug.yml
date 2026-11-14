@@ -1,0 +1,25 @@
+name: Ошибка
+description: Ошибка поиска, разбора, проверки статуса или интеграции
+body:
+  - type: markdown
+    attributes:
+      value: Не прикладывайте секреты, рабочие базы и закрытые проектные документы.
+  - type: input
+    id: version
+    attributes:
+      label: Версия sp-mcp и операционная система
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как воспроизвести
+      description: Название инструмента, аргументы без частных данных и публичный URL источника.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Ожидаемое и фактическое поведение
+    validations:
+      required: true
