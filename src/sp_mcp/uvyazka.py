@@ -131,7 +131,9 @@ def bridge_call(name, arguments):
         if os.getenv("SP_MCP_UVYAZKA_HOME"):
             env["UVYAZKA_HOME"] = os.environ["SP_MCP_UVYAZKA_HOME"]
         parameters = StdioServerParameters(command=command, args=args, env=env)
-        async with Client(parameters) as client:
+        # Uvyazka's established server uses the initialize/legacy handshake.
+        # Selecting it explicitly avoids a failed modern discovery request in its logs.
+        async with Client(parameters, mode="legacy") as client:
             result = await client.call_tool(name, arguments)
             if result.is_error:
                 raise NormsError(
