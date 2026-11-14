@@ -73,6 +73,10 @@ def main():
             import uvicorn
 
             app = make_http_app(server, service, args.host)
+            if os.getenv("SP_MCP_PUBLIC_LIMITS") == "1":
+                from .public_limits import PublicLimits
+
+                app = PublicLimits(app, config.root)
             if token:
                 app = BearerMiddleware(app, token)
             if args.command == "web":

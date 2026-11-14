@@ -1,5 +1,6 @@
 """Buildless, model-free browser client over the shared service and optional Uvyazka bridge."""
 
+import asyncio
 import hmac
 import inspect
 import json
@@ -122,15 +123,27 @@ def make_http_app(server, service, host):
         ):
             return JSONResponse({"error_code": "WRITE_TOKEN_REQUIRED"}, status_code=403)
         body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 65536:
-                return JSONResponse({"error_code": "REQUEST_TOO_LARGE"}, status_code=413)
+        try:
+            async with asyncio.timeout(15):
+                async for chunk in request.stream():
+                    body.extend(chunk)
+                    if len(body) > 65536:
+                        return JSONResponse({"error_code": "REQUEST_TOO_LARGE"}, status_code=413)
+        except TimeoutError:
+            return JSONResponse({"error_code": "REQUEST_TIMEOUT"}, status_code=408)
         try:
             args = json.loads(body or b"{}")
             if not isinstance(args, dict):
                 raise ValueError("Body must be a JSON object")
             inspect.signature(method).bind(**args)
+            if (
+                os.getenv("SP_MCP_PUBLIC_LIMITS") == "1"
+                and name == "batch_check"
+                and len(args.get("items", [])) > 2
+            ):
+                raise NormsError(
+                    "INVALID_ARGUMENT", "Публичный сервер принимает не более двух нормативов за пакет."
+                )
             result = await run_in_threadpool(method, **args)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except NormsError as exc:

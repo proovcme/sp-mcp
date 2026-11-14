@@ -19,4 +19,5 @@ jobs:
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run python -m pytest -q
+      - run: node --test tests/ui_tables.mjs
       - run: uv build

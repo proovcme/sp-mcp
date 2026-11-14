@@ -96,21 +96,38 @@ async function renderTab(){
   if(!state.doc)return;
   if(state.tab==='text')return renderText();if(state.tab==='editions')return renderEditions();if(state.tab==='check')return renderCheck();if(state.tab==='uvyazka')return renderUvyazka();
 }
-function textHtml(text){return text.split('\n').filter(Boolean).map(line=>{
-  const escaped=esc(line).replace(/\[ИЗОБРАЖЕНИЕ: (https?:\/\/[^\]]+)\]/g,(_,url)=>`<a href="${url}" target="_blank" rel="noopener noreferrer">Изображение или формула в оригинале ↗</a>`);
-  return `<p${/^\d+(\.\d+)*\s/.test(line)?' class="clause-start"':''}>${escaped}</p>`;
-}).join('');}
+function textHtml(text){
+  const lines=text.split('\n'),out=[];
+  const inline=line=>esc(line).replace(/\[ИЗОБРАЖЕНИЕ: (https?:\/\/[^\]]+)\]/g,(_,url)=>`<a href="${url}" target="_blank" rel="noopener noreferrer">Изображение или формула в оригинале ↗</a>`);
+  const cells=line=>{let value=line.trim();if(value.startsWith('|'))value=value.slice(1);if(value.endsWith('|'))value=value.slice(0,-1);const result=[];let cell='';for(let i=0;i<value.length;i++){if(value[i]==='\\'&&value[i+1]==='|'){cell+='|';i++;}else if(value[i]==='|'){result.push(cell.trim());cell='';}else cell+=value[i];}result.push(cell.trim());return result;};
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];if(!line.trim())continue;
+    if(line.trim().startsWith('```')){const code=[];while(++i<lines.length&&!lines[i].trim().startsWith('```'))code.push(lines[i]);out.push('<pre class="source-pre">'+esc(code.join('\n'))+'</pre>');continue;}
+    if(line.includes('|')&&i+1<lines.length){const separators=cells(lines[i+1]);if(separators.length>1&&separators.every(c=>/^:?-{3,}:?$/.test(c))&&cells(line).length===separators.length){const rows=[cells(line).map(text=>({text,header:true}))];i++;while(i+1<lines.length&&lines[i+1].includes('|')&&cells(lines[i+1]).length===separators.length){i++;rows.push(cells(lines[i]).map(text=>({text})));}out.push(tableHtml(rows));continue;}}
+    if(/[│┌┐└┘├┤┬┴┼]/.test(line)){const grid=[line];while(i+1<lines.length&&/[│┌┐└┘├┤┬┴┼]/.test(lines[i+1]))grid.push(lines[++i]);out.push('<pre class="source-pre" tabindex="0">'+esc(grid.join('\n'))+'</pre>');continue;}
+    out.push(`<p${/^\d+(\.\d+)*\s/.test(line)?' class="clause-start"':''}>${inline(line)}</p>`);
+  }return out.join('');
+}
+function tableHtml(rows){return '<div class="table-scroll"><table><tbody>'+rows.map(row=>'<tr>'+row.map(cell=>{const tag=cell.header?'th':'td';return `<${tag} rowspan="${Math.max(1,Math.min(Number(cell.rowspan)||1,10000))}" colspan="${Math.max(1,Math.min(Number(cell.colspan)||1,10000))}">${esc(cell.text).replace(/\n/g,'<br>')}</${tag}>`;}).join('')+'</tr>').join('')+'</tbody></table></div>';}
+function blocksHtml(blocks,fallback=''){
+  if(!blocks)return textHtml(fallback);let html='',plain=[],grid=[];
+  const flushPlain=()=>{if(plain.length){html+=textHtml(plain.join('\n'));plain=[];}};
+  const flushGrid=()=>{if(grid.length){html+='<pre class="source-pre" tabindex="0">'+esc(grid.join('\n'))+'</pre>';grid=[];}};
+  for(const block of blocks){if(block.kind==='preformatted'){flushPlain();grid.push(block.display_text||block.text);continue;}flushGrid();if(block.kind==='table'&&block.rows){flushPlain();html+=`<section class="inline-table" data-inline-table="${Number(block.table_index)}"><h3>${esc(block.caption)}</h3>${tableHtml(block.rows)}${block.total_rows>block.rows.length?'<p class="form-note">Показаны первые '+block.rows.length+' строк.</p>':''}<button type="button" class="button small" data-show-table="${Number(block.table_index)}">Открыть таблицу отдельно →</button></section>`;}else plain.push(block.text);}
+  flushPlain();flushGrid();return html;
+}
+function wireInlineTables(){document.querySelectorAll('[data-show-table]').forEach(button=>button.onclick=async()=>{try{const select=$('#table-index');if(!select)return;select.value=button.dataset.showTable;$('#table-controls details').open=true;await loadTable(0,false);$('#table-result').scrollIntoView({behavior:'auto',block:'start'});}catch(error){readerError(error);}});}
 async function renderText(){
   const doc=state.doc,epoch=state.epoch;
   $('#reader-content').innerHTML=`<div class="reader-body"><form id="inside-form" class="reader-toolbar"><label for="inside-query">Найти в документе<input id="inside-query" type="search" placeholder="Слово или выражение"></label><button class="button">Найти</button><label for="clause-number">Перейти к пункту<input id="clause-number" placeholder="7.11.1" maxlength="35"></label><button class="button" type="button" id="read-clause">Открыть</button></form><div id="text-notice"></div><div id="contents-panel"></div><div id="document-text" class="document-text">${loading('Читаем текст…')}</div><div id="text-actions"></div><div id="table-controls"></div>${diagnostics(doc.provenance)}</div>`;
   $('#inside-form').onsubmit=e=>{e.preventDefault();searchInside($('#inside-query').value).catch(readerError);};
-  $('#read-clause').onclick=async()=>{try{const n=$('#clause-number').value.trim();if(!n)return;const r=await api('read_clause',{snapshot_id:doc.snapshot_id,number:n});if(!sameDoc(doc,epoch)||state.tab!=='text')return;if(r.status!=='found'){showMessage(r.status==='ambiguous_occurrences'?'Найдено несколько вхождений. Уточните текст поиском.':'Пункт не найден в извлечённых блоках. Попробуйте поиск по тексту.','#reader-message');return;}$('#document-text').innerHTML=textHtml(r.occurrences[0].text);$('#text-actions').innerHTML='';state.clause=n;toast('Открыт пункт '+n);}catch(e){readerError(e);}};
+  $('#read-clause').onclick=async()=>{try{const n=$('#clause-number').value.trim();if(!n)return;const r=await api('read_clause',{snapshot_id:doc.snapshot_id,number:n});if(!sameDoc(doc,epoch)||state.tab!=='text')return;if(r.status!=='found'){showMessage(r.status==='ambiguous_occurrences'?'Найдено несколько вхождений. Уточните текст поиском.':'Пункт не найден в извлечённых блоках. Попробуйте поиск по тексту.','#reader-message');return;}$('#document-text').innerHTML=blocksHtml(r.occurrences[0].blocks,r.occurrences[0].text);wireInlineTables();$('#text-actions').innerHTML='';state.clause=n;toast('Открыт пункт '+n);}catch(e){readerError(e);}};
   if(doc.text_status==='metadata_only')$('#text-notice').innerHTML='<div class="text-note"><strong>Официальная карточка документа</strong>Это сведения о статусе и датах. Полный нормативный текст нужно открыть из другого найденного источника.</div>';
   else if(doc.image_count)$('#text-notice').innerHTML='<div class="text-note">Формулы и изображения доступны по ссылкам на оригинал. Их содержимое автоматически не распознаётся.</div>';
   await readChunk(0,false,doc,epoch);
   loadContents(doc,epoch).catch(readerError);
   if(!sameDoc(doc,epoch)||state.tab!=='text')return;
-  if(doc.table_count){$('#table-controls').innerHTML=`<details class="diagnostics"><summary>Таблицы документа · ${doc.table_count}</summary><div class="reader-toolbar"><label for="table-index">Выберите таблицу<select id="table-index">${Array.from({length:doc.table_count},(_,i)=>`<option value="${i}">Таблица ${i+1}</option>`).join('')}</select></label><button id="load-table" class="button">Показать таблицу</button></div><div id="table-result"></div></details>`;$('#load-table').onclick=()=>loadTable(0,false).catch(readerError);}
+  if(doc.table_count){$('#table-controls').innerHTML=`<details class="diagnostics"><summary>Таблицы документа · ${doc.table_count}</summary><div class="reader-toolbar"><label for="table-index">Выберите таблицу<select id="table-index">${Array.from({length:doc.table_count},(_,i)=>`<option value="${i}">${esc(doc.table_captions?.find(t=>t.index===i)?.caption||'Таблица '+(i+1))}</option>`).join('')}</select></label><button id="load-table" class="button">Показать таблицу</button></div><div id="table-result"></div></details>`;$('#load-table').onclick=()=>loadTable(0,false).catch(readerError);}
 }
 async function loadContents(doc,epoch){
   const data=await api('contents',{snapshot_id:doc.snapshot_id});
@@ -124,7 +141,7 @@ function sameDoc(doc,epoch){return state.doc?.snapshot_id===doc.snapshot_id&&epo
 function readerError(error){showMessage(humanError(error),'#reader-message',true);}
 async function readChunk(offset,append,doc=state.doc,epoch=state.epoch){
   const r=await api('read',{snapshot_id:doc.snapshot_id,offset,limit:16000,expected_sha256:doc.provenance.sha256});if(!sameDoc(doc,epoch)||state.tab!=='text')return;
-  if(append)$('#document-text').insertAdjacentHTML('beforeend',textHtml(r.text));else $('#document-text').innerHTML=textHtml(r.text);
+  const blocks=append&&r.blocks?r.blocks.filter(b=>b.kind!=='table'||!$('#document-text').querySelector('[data-inline-table="'+b.table_index+'"]')):r.blocks;if(append)$('#document-text').insertAdjacentHTML('beforeend',blocksHtml(blocks,r.text));else $('#document-text').innerHTML=blocksHtml(blocks,r.text);wireInlineTables();
   $('#text-actions').innerHTML=r.next_offset!==null?'<button class="button" id="read-more">Читать дальше ↓</button>':'';
   if($('#read-more'))$('#read-more').onclick=async()=>{$('#read-more').disabled=true;try{await readChunk(r.next_offset,true,doc,epoch);}catch(e){readerError(e);if($('#read-more'))$('#read-more').disabled=false;}};
 }

@@ -12,7 +12,7 @@ SQLite-базу. С локальной базой компьютера она а
 uv export --locked --no-dev --no-emit-project --no-hashes --output-file requirements.txt
 # На сервере, после передачи wheel и requirements.txt:
 python3 -m venv /opt/sp-mcp/venv
-/opt/sp-mcp/venv/bin/pip install -r /opt/sp-mcp/requirements.txt /opt/sp-mcp/sp_mcp-0.2.2-py3-none-any.whl
+/opt/sp-mcp/venv/bin/pip install -r /opt/sp-mcp/requirements.txt /opt/sp-mcp/sp_mcp-0.2.3-py3-none-any.whl
 useradd --system --home-dir /var/lib/sp-mcp --shell /usr/sbin/nologin sp-mcp
 install -m 0644 deploy/sp-mcp.service /etc/systemd/system/sp-mcp.service
 systemctl daemon-reload
@@ -34,6 +34,14 @@ systemctl enable --now sp-mcp
 
 `systemd` запускает процесс от отдельного пользователя, сохраняет данные в `/var/lib/sp-mcp`,
 ограничивает память и CPU, автоматически запускает сервис после перезагрузки. Поиск работает без модели.
+При `SP_MCP_PUBLIC_LIMITS=1` разрешены одна тяжёлая операция и до четырёх API-запросов одновременно;
+ожидающая очередь не создаётся. Тяжёлые операции ограничены шестью в минуту с одного адреса и двенадцатью
+в минуту суммарно; чтение сохранённых документов имеет отдельный бюджет. Занятость возвращает 503,
+превышение частоты — 429, оба ответа содержат `Retry-After`. Пакетная проверка публичного сервера принимает до двух документов.
+Перед новыми тяжёлыми операциями проверяются порог данных 512 МиБ и свободный резерв диска 1 ГиБ.
+При достижении порога новые операции останавливаются, сохранённые документы можно читать.
+Это проверка перед операцией, а не файловая квота; завершившаяся операция может превысить порог.
+Предел процесса — 448 МиБ RAM и 75% одного CPU; эти ограничения отделяют его от остальных сервисов VPS.
 Для копии базы используется SQLite backup API; простое копирование работающего файла не подходит.
 
 Проверка после развёртывания:

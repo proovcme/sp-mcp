@@ -9,6 +9,7 @@ from .identity import clean, designation
 from .linguistics import catalog_queries, relevance, stems, topic_relevance
 from .network import Network, validate_url
 from .parsers import parse_candidates, parse_document, soup_for
+from .presentation import reading_blocks, table_caption
 from .retrieval import Retrieval
 from .storage import Store
 from .validity import observed_validity, validity_index
@@ -378,6 +379,7 @@ class Service:
             "snapshot_id": snapshot_id,
             "code": document["code"],
             "text": document["text"][offset:end],
+            "blocks": reading_blocks(document, self.store.root, offset, end),
             "offset": offset,
             "next_offset": end if end < len(document["text"]) else None,
             "total_characters": len(document["text"]),
@@ -429,6 +431,9 @@ class Service:
                     "end": selected[-1]["end"],
                     "text": document["text"][selected[0]["start"] : selected[-1]["end"]],
                     "block_indices": [b["index"] for b in selected],
+                    "blocks": reading_blocks(
+                        document, self.store.root, selected[0]["start"], selected[-1]["end"]
+                    ),
                 }
             )
         return {
@@ -471,6 +476,7 @@ class Service:
         table = document["tables"][table_index]
         return {
             "table_index": table_index,
+            "caption": table_caption(document, table),
             "row_offset": row_offset,
             "rows": table["rows"][row_offset : row_offset + limit],
             "total_rows": len(table["rows"]),
@@ -596,6 +602,10 @@ class Service:
     def document(self, snapshot_id):
         doc = self.store.get(snapshot_id)
         return self.summary(doc) | {
+            "table_captions": [
+                {"index": t["index"], "caption": table_caption(doc, t), "total_rows": len(t["rows"])}
+                for t in doc["tables"]
+            ],
             "saved_editions": self.store.library(limit=100, code=doc["code"])["items"],
             "last_verification": next(
                 iter(self.store.verification_history(snapshot_id, limit=1)["items"]), None
