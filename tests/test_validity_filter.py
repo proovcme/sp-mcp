@@ -1,10 +1,11 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from conftest import fetched, official_html
 
 from sp_mcp.parsers import parse_candidates, parse_document
 from sp_mcp.service import Service
 from sp_mcp.validity import validity_index
+from sp_mcp.verification import today_moscow
 
 
 def catalog(service, status="Отменен", change=False, checked=None):
@@ -86,7 +87,7 @@ def test_historical_verification_does_not_hide_today_but_current_one_does(config
     report = {"code": "СП 900.100.2099", "document_status": "cancelled", "verification": "confirmed"}
     service.store.save_verification(report | {"as_of": "2020-01-01"})
     assert service.library()["total"] == 1
-    service.store.save_verification(report | {"as_of": date.today().isoformat()})
+    service.store.save_verification(report | {"as_of": today_moscow().isoformat()})
     assert service.library()["total"] == 0
 
 
