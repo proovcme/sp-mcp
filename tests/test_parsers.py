@@ -1,8 +1,22 @@
 import pytest
 from conftest import fetched, official_html
 
+from sp_mcp.errors import NormsError
 from sp_mcp.identity import change_number, designation, parse_date, status_value
-from sp_mcp.parsers import parse_candidates, parse_document
+from sp_mcp.parsers import parse_candidates, parse_document, pdf_cover_identity
+
+
+def test_pdf_cover_identity_needs_unique_title_evidence():
+    reference = "Учебная ссылка на СП 901.100.2099 в предисловии."
+    assert pdf_cover_identity(reference + "\nСП\n900.100.2099", None) == "СП 900.100.2099"
+    for cover, title, expected in (
+        (reference, None, None),
+        ("СП 900.100.2099\nСП 901.100.2099", None, None),
+        ("СП 900.100.2099", "СП 901.100.2099", None),
+        ("СП 900.100.2099", None, "СП 901.100.2099"),
+    ):
+        with pytest.raises(NormsError, match="unique PDF designation"):
+            pdf_cover_identity(cover, title, expected)
 
 
 @pytest.mark.parametrize(

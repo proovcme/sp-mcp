@@ -13,12 +13,15 @@ class Config:
     max_bytes: int = 24 * 1024 * 1024
     freshness_days: int = 7
     user_agent: str = "sp-mcp/0.1 (+public normative document research)"
+    operation_timeout: float = 60
 
     def __post_init__(self):
         if not 1 <= self.timeout <= 120 or not 0.1 <= self.interval <= 60:
             raise ValueError("Timeout must be 1..120 s; interval 0.1..60 s")
         if not 1 <= self.freshness_days <= 90:
             raise ValueError("Freshness must be 1..90 days")
+        if not 1 <= self.operation_timeout <= 120:
+            raise ValueError("Operation timeout must be 1..120 s")
 
     @classmethod
     def from_env(cls):
@@ -27,4 +30,5 @@ class Config:
             timeout=float(os.getenv("SP_MCP_TIMEOUT", "25")),
             interval=float(os.getenv("SP_MCP_REQUEST_INTERVAL", "1")),
             freshness_days=int(os.getenv("SP_MCP_FRESHNESS_DAYS", "7")),
+            operation_timeout=float(os.getenv("SP_MCP_OPERATION_TIMEOUT", "60")),
         )

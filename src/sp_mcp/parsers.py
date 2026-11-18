@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 from .errors import NormsError
-from .identity import change_number, clean, designation, parse_date, status_value
+from .identity import CODE, change_number, clean, designation, parse_date, status_value
 from .network import decode
 
 
@@ -57,9 +57,9 @@ def parse_candidates(fetched):
     return items
 
 
-def parse_document(fetched):
+def parse_document(fetched, *, expected_code=None):
     if fetched["raw"].startswith(b"%PDF-"):
-        return parse_pdf(fetched)
+        return parse_pdf(fetched, expected_code=expected_code)
     soup = soup_for(fetched)
     source, authority = source_for(fetched["url"])
     root = soup.find("main") or soup.body or soup
@@ -199,14 +199,35 @@ def parse_document(fetched):
     }
 
 
-def parse_pdf(fetched):
+def pdf_cover_identity(cover, title, expected_code=None):
+    # Body references do not identify a PDF. Use a designation on its own cover line
+    # or one that starts an explicit PDF title, and reject contradictory cover evidence.
+    lines = [clean(line) for line in cover[:4000].splitlines() if line.strip()]
+    cover_codes = {designation(line) for line in lines if CODE.fullmatch(line)}
+    for family, number in zip(lines, lines[1:]):
+        joined = family + " " + number
+        if not any(char.isdigit() for char in family) and CODE.fullmatch(joined):
+            cover_codes.add(designation(joined))
+    title = clean(title or "")
+    if CODE.match(title):
+        cover_codes.add(designation(title))
+    if len(cover_codes) != 1 or (expected_code and expected_code not in cover_codes):
+        raise NormsError(
+            "PDF_IDENTITY_UNRESOLVED", "Cannot establish a unique PDF designation from title evidence"
+        )
+    return cover_codes.pop()
+
+
+def parse_pdf(fetched, *, expected_code=None):
     try:
         reader = PdfReader(io.BytesIO(fetched["raw"]))
         if reader.is_encrypted or len(reader.pages) > 300:
             raise NormsError("PDF_LIMIT", "Encrypted PDFs and PDFs over 300 pages require separate intake")
+        cover = (reader.pages[0].extract_text() or "") if reader.pages else ""
+        code = pdf_cover_identity(cover, reader.metadata.title if reader.metadata else None, expected_code)
         blocks, position = [], 0
         for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
+            text = (page.extract_text() or "") if i else cover
             blocks.append(
                 {
                     "index": i,
@@ -223,9 +244,6 @@ def parse_pdf(fetched):
     except Exception as exc:
         raise NormsError("PDF_PARSE_ERROR", f"PDF could not be read ({type(exc).__name__})") from exc
     text = "\n".join(b["text"] for b in blocks)
-    code = designation(text[:4000])
-    if not code:
-        raise NormsError("PDF_IDENTITY_UNRESOLVED", "Cannot confirm document designation in PDF text")
     source, authority = source_for(fetched["url"])
     return {
         "source": source,
@@ -233,7 +251,8 @@ def parse_pdf(fetched):
         "code": code,
         "title": code,
         "change_number": None,
-        "fields": {},
+        "fields": {"Обозначение": code},
+        "identity_verified_from_cover": True,
         "raw_status": "",
         "declared_status": "unknown",
         "effective_from": None,

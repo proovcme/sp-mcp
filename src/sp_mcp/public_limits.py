@@ -82,6 +82,10 @@ class PublicLimits:
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
+        if scope["type"] == "http" and (path == "/mcp" or path.startswith(("/mcp/", "/api/uvyazka_"))):
+            return await JSONResponse({"error_code": "METHOD_NOT_FOUND"}, status_code=404)(
+                scope, receive, send
+            )
         if scope["type"] != "http" or not path.startswith("/api/"):
             return await self.app(scope, receive, send)
         method = path.removeprefix("/api/")

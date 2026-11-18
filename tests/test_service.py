@@ -68,6 +68,27 @@ def test_network_failure_is_not_not_found(config):
     assert service.store.verification(report["verification_id"])["verification"] == "unconfirmed"
 
 
+def test_search_inside_document_only_consumes_one_page_of_matches(config, monkeypatch):
+    import re
+
+    service = Service(config)
+    doc = save(service, "<title>СП 900.100.2099</title><p>" + "слово " * 20000 + "</p>")
+    pattern = re.compile("слово", re.I)
+
+    class BoundedMatches:
+        def finditer(self, *args):
+            for index, match in enumerate(pattern.finditer(*args)):
+                assert index < 4, "Matcher consumed results after the requested page and lookahead"
+                yield match
+
+    monkeypatch.setattr(service.store, "get", lambda snapshot_id: doc)
+    with monkeypatch.context() as patch:
+        patch.setattr("sp_mcp.service.re.compile", lambda *args: BoundedMatches())
+        page = service.search_document(doc["snapshot_id"], "слово", limit=3)
+    assert len(page["items"]) == 3
+    assert page["next_offset"] is not None
+
+
 def test_batch_preserves_failed_input_and_continues(config):
     service = Service(config)
     result = service.batch_check(

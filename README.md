@@ -3,7 +3,7 @@
 [![Checks](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](CHANGELOG.md)
 
 **Найти норматив. Прочитать пункт. Проверить редакцию. Сохранить основание в проекте.**
 
@@ -50,6 +50,8 @@ flowchart LR
 
 В API `items` для запросов словами содержит документы без повторов, с `discovered_sources`; `text_hits` — полные тематические совпадения, `related_text_hits` — частичные совпадения и упоминания из других дисциплин. `discovery_anchor` показывает слово обнаружения. Проверка актуальности выполняется отдельно.
 
+`page` и `limit` листают объединённую выдачу по документам. Фрагмент появляется на странице своего документа. Смежные результаты показываются на первой странице. Нумерация страниц каталогов независима. При исчерпании сетевого бюджета поиск возвращает данные из доступных источников, `status: partial` и причину в `source_errors`.
+
 Четыре результата остаются независимыми:
 
 | Поле | Значение |
@@ -61,6 +63,7 @@ flowchart LR
 
 `confirmed` не означает, что загруженный текст актуален: проверяйте `text_revision_status` отдельно.
 `amendments_accounted_for` означает сверку перечисленных изменений, **не аутентификацию всего текста**.
+`unknown_changes` показывает изменения в тексте, для которых не найдена официальная карточка, а `undated_changes` — изменения без даты введения по карточкам. В обоих случаях подтверждения полноты редакции нет.
 Текущий каталог сам по себе не подтверждает исторический статус документа или статус в будущем.
 
 ## Быстрый запуск
@@ -77,8 +80,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 codex mcp add sp --env PYTHONUTF8=1 -- uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 ```
 
-Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.5`:
-`git+https://github.com/proovcme/sp-mcp.git@v0.2.5`.
+Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.6`:
+`git+https://github.com/proovcme/sp-mcp.git@v0.2.6`.
 
 Для разработки:
 
@@ -109,7 +112,7 @@ uv run sp-mcp sources
 ```bash
 uv run sp-mcp web
 # или из опубликованной версии:
-uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.5 sp-mcp web
+uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.6 sp-mcp web
 ```
 
 Откройте **http://127.0.0.1:8767/**. Это интерфейс той же SQLite-базы, которой пользуется MCP.
@@ -212,9 +215,11 @@ uv run sp-mcp --transport streamable-http --port 8767
 |---|---|
 | `SP_MCP_DATA_DIR` | Пользовательский каталог данных `sp-mcp` через platformdirs |
 | `SP_MCP_TIMEOUT` | 25 секунд на запрос |
+| `SP_MCP_OPERATION_TIMEOUT` | 60 секунд на сетевые обращения одной операции, включая пакетную проверку, и не более 36 обращений |
 | `SP_MCP_REQUEST_INTERVAL` | Минимум 1 секунда между запросами |
 | `SP_MCP_FRESHNESS_DAYS` | 7 дней для сохранённого наблюдения статуса |
 | `SP_MCP_HTTP_TOKEN` | Не задан; локальный HTTP без токена |
+| `SP_MCP_ALLOWED_HOSTS` | Дополнительные разрешённые HTTP Host через запятую, например `locia.work` за обратным прокси |
 
 На Windows для CLI рекомендуется `PYTHONUTF8=1` или `python -X utf8 -m sp_mcp`.
 Карточки повторно используются до часа, страницы каталогов — до суток. `sp_check_status` по умолчанию

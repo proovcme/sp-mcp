@@ -50,7 +50,7 @@ def test_same_service_available_as_http_api(config):
 
     server, service = create_server(config)
     app = BearerMiddleware(make_http_app(server, service, "127.0.0.1"), "synthetic-token")
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         assert client.get("/health").status_code == 401
         headers = {"Authorization": "Bearer synthetic-token"}
         assert client.get("/health", headers=headers).json()["name"] == "sp-mcp"

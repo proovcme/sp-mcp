@@ -140,7 +140,38 @@ class Retrieval:
                 CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_fts USING fts5(id UNINDEXED,terms);
                 CREATE TABLE IF NOT EXISTS retrieval_vectors(id TEXT,space TEXT,vector BLOB,PRIMARY KEY(id,space));
                 CREATE TABLE IF NOT EXISTS retrieval_meta(key TEXT PRIMARY KEY,payload TEXT);
+                CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_vocab USING fts5vocab(retrieval_fts,'row');
+                CREATE TABLE IF NOT EXISTS retrieval_dirty(kind TEXT,key TEXT,PRIMARY KEY(kind,key));
+                CREATE TABLE IF NOT EXISTS retrieval_documents(
+                    url TEXT PRIMARY KEY, snapshot_id TEXT, code TEXT, edition TEXT, observed TEXT, issue TEXT);
+                CREATE INDEX IF NOT EXISTS retrieval_documents_code ON retrieval_documents(code,edition,observed);
+                CREATE TABLE IF NOT EXISTS retrieval_owners(id TEXT PRIMARY KEY,kind TEXT,key TEXT);
+                CREATE INDEX IF NOT EXISTS retrieval_owners_key ON retrieval_owners(kind,key);
+                CREATE TABLE IF NOT EXISTS retrieval_selected(code TEXT PRIMARY KEY,snapshot_id TEXT);
+                CREATE TRIGGER IF NOT EXISTS retrieval_candidate_insert AFTER INSERT ON candidates BEGIN
+                    INSERT OR REPLACE INTO retrieval_dirty VALUES ('title',NEW.url);
+                END;
+                CREATE TRIGGER IF NOT EXISTS retrieval_candidate_update AFTER UPDATE ON candidates BEGIN
+                    INSERT OR REPLACE INTO retrieval_dirty VALUES ('title',NEW.url);
+                END;
+                CREATE TRIGGER IF NOT EXISTS retrieval_candidate_delete AFTER DELETE ON candidates BEGIN
+                    INSERT OR REPLACE INTO retrieval_dirty VALUES ('title',OLD.url);
+                END;
+                CREATE TRIGGER IF NOT EXISTS retrieval_observation_insert AFTER INSERT ON observations BEGIN
+                    INSERT OR REPLACE INTO retrieval_dirty
+                    SELECT 'document', url FROM snapshots WHERE id=NEW.snapshot_id;
+                END;
             """)
+
+            db.execute("BEGIN IMMEDIATE")
+            schema_version = "incremental_v1"
+            if not db.execute("SELECT 1 FROM retrieval_meta WHERE key=?", (schema_version,)).fetchone():
+                # Derived data only. Original snapshots, reports and source bytes stay intact.
+                for table in ("retrieval_fts", "retrieval_segments", "retrieval_vectors"):
+                    db.execute(f"DELETE FROM {table}")
+                db.execute("INSERT OR IGNORE INTO retrieval_dirty SELECT 'title',url FROM candidates")
+                db.execute("INSERT OR IGNORE INTO retrieval_dirty SELECT 'document',url FROM snapshots")
+                db.execute("INSERT INTO retrieval_meta VALUES (?,'true')", (schema_version,))
 
     def configuration(self):
         path = Path(os.getenv("SP_MCP_EMBEDDING_CONFIG") or self.store.root / "embedding-worker.json")
@@ -166,97 +197,165 @@ class Retrieval:
                 self.worker = LocalEmbeddings(config)
             return self.worker
 
-    def sync(self):
+    @staticmethod
+    def title_segments(row):
+        if not row:
+            return []
+        item = json.loads(row[0])
+        if item.get("change_number") is not None:
+            return []
+        label = item["title"].split("Открыть карточку")[0]
+        return [
+            {
+                "kind": "title",
+                "code": candidate_code(item),
+                "url": item["url"],
+                "title": label,
+                "text": bounded_utf8(label),
+                "source": item["source"],
+            }
+        ]
+
+    @staticmethod
+    def document_segments(doc):
         entries = []
-        self.identity_issues = []
-        with self.store.db() as db:
-            candidates = [json.loads(row[0]) for row in db.execute("SELECT payload FROM candidates")]
-        for item in candidates:
-            item["code"] = candidate_code(item)
-            label = item["title"].split("Открыть карточку")[0]
-            if not item.get("change_number"):
+        lead = None
+        for block in doc["blocks"]:
+            numbered = r"^((?:[А-ЯA-Z]\.)?\d+(?:\.\d+)+)(?:\.?\s)"
+            match = re.match(numbered, block["text"])
+            heading = match[1] if match else None
+            is_list = bool(re.match(r"^(?:[-–—]|[а-яa-z]\))\s", block["text"], re.I))
+            if not is_list and not block["text"].startswith("("):
+                lead = block if block["text"].endswith(":") else None
+            for local_offset in range(0, len(block["text"]), 550):
+                text = block["text"][local_offset : local_offset + 650]
+                if len(text) < 40:
+                    continue
+                start, end = block["start"] + local_offset, block["start"] + local_offset + len(text)
+                clause = heading
+                if is_list and local_offset == 0 and lead and end - lead["start"] <= 2000:
+                    start = lead["start"]
+                    text = doc["text"][start:end]
+                    literal_number = re.match(numbered, text)
+                    clause = literal_number[1] if literal_number else None
                 entries.append(
                     {
-                        "kind": "title",
-                        "code": item["code"],
-                        "url": item["url"],
-                        "title": label,
-                        "text": bounded_utf8(label),
-                        "source": item["source"],
-                    }
-                )
-        latest = {}
-        for item in self.store.library(limit=10000)["items"]:
-            if item["text_status"] == "metadata_only":
-                continue
-            previous = latest.get(item["code"])
-            if not previous or (item.get("edition_date") or "") > (previous.get("edition_date") or ""):
-                latest[item["code"]] = item
-        for item in latest.values():
-            try:
-                doc = self.store.get(item["snapshot_id"])
-            except NormsError:
-                continue
-            expected = designation(doc.get("fields", {}).get("Обозначение", doc["title"]))
-            if expected and expected != doc["code"]:
-                self.identity_issues.append(
-                    {
+                        "kind": "text",
+                        "code": doc["code"],
                         "snapshot_id": doc["snapshot_id"],
                         "url": doc["provenance"]["source_url"],
-                        "reason": "cached_identity_requires_reopen",
-                        "expected_code": expected,
+                        "title": doc["title"],
+                        "clause": clause,
+                        "start": start,
+                        "end": end,
+                        "text": text,
+                        "scope_exclusion": bool(re.search(r"\bне\s+распространя", text, re.I)),
+                        "sha256": doc["provenance"]["sha256"],
+                        "source": doc["source"],
                     }
                 )
-                continue
-            lead = None
-            for block in doc["blocks"]:
-                numbered = r"^((?:[А-ЯA-Z]\.)?\d+(?:\.\d+)+)(?:\.?\s)"
-                match = re.match(numbered, block["text"])
-                heading = match[1] if match else None
-                is_list = bool(re.match(r"^(?:[-–—]|[а-яa-z]\))\s", block["text"], re.I))
-                if not is_list and not block["text"].startswith("("):
-                    lead = block if block["text"].endswith(":") else None
-                for local_offset in range(0, len(block["text"]), 550):
-                    text = block["text"][local_offset : local_offset + 650]
-                    if len(text) < 40:
-                        continue
-                    start, end = block["start"] + local_offset, block["start"] + local_offset + len(text)
-                    clause = heading
-                    if is_list and local_offset == 0 and lead and end - lead["start"] <= 2000:
-                        start = lead["start"]
-                        text = doc["text"][start:end]
-                        literal_number = re.match(numbered, text)
-                        clause = literal_number[1] if literal_number else None
-                    entries.append(
-                        {
-                            "kind": "text",
-                            "code": doc["code"],
-                            "snapshot_id": doc["snapshot_id"],
-                            "url": doc["provenance"]["source_url"],
-                            "title": doc["title"],
-                            "clause": clause,
-                            "start": start,
-                            "end": end,
-                            "text": text,
-                            "scope_exclusion": bool(re.search(r"\bне\s+распространя", text, re.I)),
-                            "sha256": doc["provenance"]["sha256"],
-                            "source": doc["source"],
-                        }
-                    )
+        return entries
+
+    @staticmethod
+    def replace_segments(db, kind, key, entries):
+        wanted = {sha(dump(item).encode()): item for item in entries}
+        existing = {
+            row[0]
+            for row in db.execute("SELECT id FROM retrieval_owners WHERE kind=? AND key=?", (kind, key))
+        }
+        for ident in existing - wanted.keys():
+            db.execute(
+                "DELETE FROM retrieval_fts WHERE rowid=(SELECT rowid FROM retrieval_segments WHERE id=?)",
+                (ident,),
+            )
+            db.execute("DELETE FROM retrieval_vectors WHERE id=?", (ident,))
+            db.execute("DELETE FROM retrieval_segments WHERE id=?", (ident,))
+            db.execute("DELETE FROM retrieval_owners WHERE id=?", (ident,))
+        for ident in wanted.keys() - existing:
+            item = wanted[ident]
+            rowid = db.execute(
+                "INSERT INTO retrieval_segments VALUES (?,?,?,1)", (ident, kind, dump(item))
+            ).lastrowid
+            db.execute(
+                "INSERT INTO retrieval_fts(rowid,id,terms) VALUES (?,?,?)",
+                (rowid, ident, " ".join(stems(item["text"]))),
+            )
+            db.execute("INSERT INTO retrieval_owners VALUES (?,?,?)", (ident, kind, key))
+
+    def update_document(self, db, url):
+        previous = db.execute(
+            "SELECT snapshot_id,code FROM retrieval_documents WHERE url=?", (url,)
+        ).fetchone()
+        head = db.execute(
+            """SELECT s.id,o.checked_at FROM snapshots s JOIN observations o ON s.id=o.snapshot_id
+            WHERE s.url=? ORDER BY o.checked_at DESC,s.id LIMIT 1""",
+            (url,),
+        ).fetchone()
+        affected = {previous["code"]} if previous and previous["code"] else set()
+        if not head:
+            db.execute("DELETE FROM retrieval_documents WHERE url=?", (url,))
+            return affected
+        if previous and previous["snapshot_id"] == head["id"]:
+            db.execute("UPDATE retrieval_documents SET observed=? WHERE url=?", (head["checked_at"], url))
+            return affected
+        code, edition, issue = None, "", None
+        try:
+            doc = self.store.get(head["id"], connection=db)
+        except NormsError as exc:
+            issue = {"reason": exc.code}
+        else:
+            if doc["text_status"] != "metadata_only" and doc.get("change_number") is None:
+                expected = designation(doc.get("fields", {}).get("Обозначение", doc["title"]))
+                if doc["text_status"] == "extracted_pdf" and not doc.get("identity_verified_from_cover"):
+                    issue = {"reason": "pdf_identity_requires_reopen"}
+                elif expected and expected != doc["code"]:
+                    issue = {"reason": "cached_identity_requires_reopen", "expected_code": expected}
+                else:
+                    code, edition = doc["code"], doc.get("edition_date") or ""
+                    affected.add(code)
+        db.execute(
+            "INSERT OR REPLACE INTO retrieval_documents VALUES (?,?,?,?,?,?)",
+            (
+                url,
+                head["id"],
+                code,
+                edition,
+                head["checked_at"],
+                dump(issue | {"snapshot_id": head["id"], "url": url}) if issue else None,
+            ),
+        )
+        return affected
+
+    def sync(self):
         with self.store.db() as db:
-            db.execute("UPDATE retrieval_segments SET active=0")
-            for item in entries:
-                ident = sha(dump(item).encode())
-                inserted = db.execute(
-                    "INSERT OR IGNORE INTO retrieval_segments VALUES (?,?,?,1)",
-                    (ident, item["kind"], dump(item)),
-                ).rowcount
-                db.execute("UPDATE retrieval_segments SET active=1 WHERE id=?", (ident,))
-                if inserted:
-                    db.execute(
-                        "INSERT INTO retrieval_fts VALUES (?,?)", (ident, " ".join(stems(item["text"])))
-                    )
-        return len(entries)
+            if not db.execute("SELECT 1 FROM retrieval_dirty LIMIT 1").fetchone():
+                return
+            db.execute("BEGIN IMMEDIATE")
+            affected = set()
+            for kind, key in db.execute("SELECT kind,key FROM retrieval_dirty").fetchall():
+                if kind == "title":
+                    row = db.execute("SELECT payload FROM candidates WHERE url=?", (key,)).fetchone()
+                    self.replace_segments(db, kind, key, self.title_segments(row))
+                else:
+                    affected.update(self.update_document(db, key))
+            for code in affected:
+                best = db.execute(
+                    """SELECT snapshot_id FROM retrieval_documents WHERE code=?
+                    ORDER BY edition DESC,observed DESC,snapshot_id LIMIT 1""",
+                    (code,),
+                ).fetchone()
+                current = db.execute(
+                    "SELECT snapshot_id FROM retrieval_selected WHERE code=?", (code,)
+                ).fetchone()
+                if best == current:
+                    continue
+                entries = self.document_segments(self.store.get(best[0], connection=db)) if best else []
+                self.replace_segments(db, "text", code, entries)
+                if best:
+                    db.execute("INSERT OR REPLACE INTO retrieval_selected VALUES (?,?)", (code, best[0]))
+                else:
+                    db.execute("DELETE FROM retrieval_selected WHERE code=?", (code,))
+            db.execute("DELETE FROM retrieval_dirty")
 
     def status(self):
         with self.store.db() as db:
@@ -318,8 +417,14 @@ class Retrieval:
                     with self.store.db() as db:
                         for row, vector in zip(batch, vectors):
                             db.execute(
-                                "INSERT OR REPLACE INTO retrieval_vectors VALUES (?,?,?)",
-                                (row["id"], worker.space, struct.pack("<" + "f" * len(vector), *vector)),
+                                """INSERT OR REPLACE INTO retrieval_vectors SELECT ?,?,?
+                                WHERE EXISTS (SELECT 1 FROM retrieval_segments WHERE id=?)""",
+                                (
+                                    row["id"],
+                                    worker.space,
+                                    struct.pack("<" + "f" * len(vector), *vector),
+                                    row["id"],
+                                ),
                             )
                     processed += len(batch)
                     self.update_job(
@@ -351,14 +456,23 @@ class Retrieval:
         literal = []
         with self.store.db() as db:
             if tokens:
-                vocabulary = set()
-                for row in db.execute("SELECT terms FROM retrieval_fts"):
-                    vocabulary.update(row[0].split())
                 if mode == "concept":
                     for group in query_groups:
                         for term in tuple(group):
-                            if term not in vocabulary and len(term) > 5:
-                                matches = difflib.get_close_matches(term, vocabulary, n=1, cutoff=0.85)
+                            if (
+                                len(term) > 5
+                                and not db.execute(
+                                    "SELECT 1 FROM retrieval_vocab WHERE term=?", (term,)
+                                ).fetchone()
+                            ):
+                                alternatives = (
+                                    row[0]
+                                    for row in db.execute(
+                                        "SELECT term FROM retrieval_vocab WHERE term GLOB ? LIMIT 500",
+                                        (term[0] + "*",),
+                                    )
+                                )
+                                matches = difflib.get_close_matches(term, alternatives, n=1, cutoff=0.85)
                                 if matches:
                                     group.update(matches)
                                     corrections[term] = matches[0]
@@ -445,6 +559,13 @@ class Retrieval:
                 if item.get("similarity") is not None:
                     entry["similarity"] = item["similarity"]
         results = sorted(combined.values(), key=lambda r: -r["score"])
+        with self.store.db() as db:
+            identity_issues = [
+                json.loads(row[0])
+                for row in db.execute(
+                    "SELECT issue FROM retrieval_documents WHERE issue IS NOT NULL LIMIT 10"
+                )
+            ]
         return {
             "items": results[:limit],
             "mode": mode,
@@ -452,5 +573,5 @@ class Retrieval:
             "index": self.status(),
             "model_used": mode in {"semantic", "hybrid"} and bool(semantic),
             "query_corrections": corrections,
-            "identity_issues": self.identity_issues[:10],
+            "identity_issues": identity_issues,
         }

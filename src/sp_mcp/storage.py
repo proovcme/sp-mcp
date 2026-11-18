@@ -3,7 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 
 from .errors import NormsError
@@ -60,6 +60,7 @@ class Store:
                 CREATE VIRTUAL TABLE IF NOT EXISTS text_search USING fts5(
                     snapshot_id UNINDEXED, code, title, text, tokenize='unicode61');
                 CREATE INDEX IF NOT EXISTS snapshots_url ON snapshots(url, observed_at);
+                CREATE INDEX IF NOT EXISTS observations_snapshot ON observations(snapshot_id, checked_at DESC);
             """)
 
     @contextmanager
@@ -99,8 +100,8 @@ class Store:
                 )
         return payload
 
-    def get(self, ident, expected_sha256=None):
-        with self.db() as db:
+    def get(self, ident, expected_sha256=None, *, connection=None):
+        with nullcontext(connection) if connection is not None else self.db() as db:
             row = db.execute("SELECT * FROM snapshots WHERE id=?", (ident,)).fetchone()
             if not row:
                 raise NormsError("SNAPSHOT_NOT_FOUND", "Snapshot not present in this local database")
@@ -133,10 +134,18 @@ class Store:
             for item in items:
                 previous = db.execute("SELECT payload FROM candidates WHERE url=?", (item["url"],)).fetchone()
                 item = prefer_candidate(json.loads(previous[0]) if previous else None, item)
+                payload = dump(item)
+                if previous and previous[0] == payload:
+                    continue
                 db.execute(
                     "INSERT OR REPLACE INTO candidates VALUES (?,?,?,?,?)",
-                    (item["url"], item.get("code"), item["title"], item["source"], dump(item)),
+                    (item["url"], item.get("code"), item["title"], item["source"], payload),
                 )
+
+    def candidate_at(self, url):
+        with self.db() as db:
+            row = db.execute("SELECT payload FROM candidates WHERE url=?", (url,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def save_catalog(self, fetched, payload):
         digest = sha(fetched["raw"])

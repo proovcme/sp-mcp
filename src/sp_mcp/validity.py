@@ -2,15 +2,17 @@
 
 import json
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from .identity import candidate_code, parse_date, status_value
+from .verification import today_moscow
 
 INACTIVE = {"cancelled", "replaced", "not_yet_effective"}
 
 
 def validity_index(store, freshness_days=7):
-    today = date.today().isoformat()
+    moscow = timezone(timedelta(hours=3))
+    today = today_moscow().isoformat()
     cutoff = datetime.now(timezone.utc) - timedelta(days=freshness_days)
     observations = {}
 
@@ -116,7 +118,8 @@ def validity_index(store, freshness_days=7):
     for row in reports:
         report = json.loads(row[0])
         code = report["code"]
-        if code in seen_reports or report.get("as_of") != today:
+        checked = datetime.fromisoformat(report["checked_at"]).astimezone(moscow).date().isoformat()
+        if code in seen_reports or report.get("as_of") != today or checked != today:
             continue
         seen_reports.add(code)
         if report.get("verification") == "confirmed":

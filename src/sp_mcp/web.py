@@ -5,8 +5,8 @@ import hmac
 import inspect
 import json
 import os
+import re
 import secrets
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
@@ -16,10 +16,15 @@ from starlette.routing import Route
 from . import __version__
 from .errors import NormsError
 from .uvyazka import bridge_call, prepare_link
+from .verification import today_moscow
 
 UI = Path(__file__).parent / "ui"
 ASSETS = {"app.js": "text/javascript", "style.css": "text/css", "mark.svg": "image/svg+xml"}
 WRITE_METHODS = {"uvyazka_attach"}
+
+
+def reject_json_constant(value):
+    raise ValueError(f"Invalid JSON constant: {value}")
 
 
 def methods_for(service):
@@ -50,12 +55,12 @@ def methods_for(service):
     def uvyazka_projects():
         return bridge_call("list_projects", {})
 
-    def uvyazka_documents(project_id, query="", offset=0):
+    def uvyazka_documents(project_id: str, query="", offset=0):
         return bridge_call(
             "find_documents", {"project_id": project_id, "query": query, "limit": 30, "offset": offset}
         )
 
-    def uvyazka_link_state(project_id, analysis_id):
+    def uvyazka_link_state(project_id: str, analysis_id: str):
         result = bridge_call(
             "get_project_structure",
             {"project_id": project_id, "kind": "analyses", "query": analysis_id, "limit": 100},
@@ -68,7 +73,13 @@ def methods_for(service):
         return {"revision": max((item["revision"] for item in found), default=0)}
 
     def uvyazka_prepare(
-        project_id, project_source, snapshot_id, verification_id, clause=None, expected_revision=0, reason=""
+        project_id: str,
+        project_source: dict,
+        snapshot_id: str,
+        verification_id: str,
+        clause=None,
+        expected_revision=0,
+        reason="",
     ):
         return prepare_link(
             service,
@@ -82,7 +93,13 @@ def methods_for(service):
         )
 
     def uvyazka_attach(
-        project_id, project_source, snapshot_id, verification_id, clause=None, expected_revision=0, reason=""
+        project_id: str,
+        project_source: dict,
+        snapshot_id: str,
+        verification_id: str,
+        clause=None,
+        expected_revision=0,
+        reason="",
     ):
         payload = uvyazka_prepare(
             project_id, project_source, snapshot_id, verification_id, clause, expected_revision, reason
@@ -119,7 +136,7 @@ def make_http_app(server, service, host):
         if origin and origin != expected_origin:
             return JSONResponse({"error_code": "ORIGIN_REJECTED"}, status_code=403)
         if name in WRITE_METHODS and not hmac.compare_digest(
-            request.headers.get("x-sp-token", ""), csrf_token
+            request.headers.get("x-sp-token", "").encode(), csrf_token.encode()
         ):
             return JSONResponse({"error_code": "WRITE_TOKEN_REQUIRED"}, status_code=403)
         body = bytearray()
@@ -132,10 +149,20 @@ def make_http_app(server, service, host):
         except TimeoutError:
             return JSONResponse({"error_code": "REQUEST_TIMEOUT"}, status_code=408)
         try:
-            args = json.loads(body or b"{}")
+            args = json.loads(body or b"{}", parse_constant=reject_json_constant)
             if not isinstance(args, dict):
                 raise ValueError("Body must be a JSON object")
-            inspect.signature(method).bind(**args)
+            signature = inspect.signature(method)
+            signature.bind(**args)
+            for key, value in args.items():
+                parameter = signature.parameters[key]
+                if value is None and parameter.default is None:
+                    continue
+                expected = parameter.annotation
+                if expected is inspect.Parameter.empty:
+                    expected = str if parameter.default is None else type(parameter.default)
+                if type(value) is not expected:
+                    raise NormsError("INVALID_ARGUMENT", f"{key} must be {expected.__name__}")
             if (
                 os.getenv("SP_MCP_PUBLIC_LIMITS") == "1"
                 and name == "batch_check"
@@ -156,7 +183,7 @@ def make_http_app(server, service, host):
             {
                 "version": __version__,
                 "write_token": csrf_token,
-                "today": datetime.now(timezone(timedelta(hours=3))).date().isoformat(),
+                "today": today_moscow().isoformat(),
                 "uvyazka_configured": bool(os.getenv("SP_MCP_UVYAZKA_COMMAND")),
                 "search_requires_ai": False,
             },
@@ -192,4 +219,29 @@ def make_http_app(server, service, host):
             Route("/health", health),
         ]
     )
+    allowed_hosts = {"localhost", "127.0.0.1", "::1", host}
+    allowed_hosts.update(
+        value.strip() for value in os.getenv("SP_MCP_ALLOWED_HOSTS", "").split(",") if value.strip()
+    )
+    app.add_middleware(HostMiddleware, allowed_hosts=allowed_hosts)
     return app
+
+
+class HostMiddleware:
+    def __init__(self, app, allowed_hosts):
+        self.app = app
+        self.allowed_hosts = {host.lower() for host in allowed_hosts}
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            values = [value for key, value in scope["headers"] if key == b"host"]
+            match = (
+                re.fullmatch(rb"(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(?::[0-9]{1,5})?", values[0])
+                if len(values) == 1
+                else None
+            )
+            if not match or match[1].decode("ascii").strip("[]").lower() not in self.allowed_hosts:
+                return await JSONResponse({"error_code": "HOST_REJECTED"}, status_code=400)(
+                    scope, receive, send
+                )
+        return await self.app(scope, receive, send)

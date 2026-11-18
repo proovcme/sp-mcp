@@ -11,7 +11,7 @@ def test_browser_and_mcp_service_use_the_same_snapshots(config, synthetic_html):
     server, service = create_server(config)
     raw = fetched(synthetic_html)
     saved = service.store.save(raw, parse_document(raw))
-    with TestClient(make_http_app(server, service, "127.0.0.1")) as client:
+    with TestClient(make_http_app(server, service, "127.0.0.1"), base_url="http://127.0.0.1") as client:
         assert client.get("/").status_code == 200
         assert client.get("/assets/app.js").status_code == 200
         assert client.get("/assets/not-a-file").status_code == 404
@@ -32,7 +32,7 @@ def test_project_write_requires_same_origin_and_session_token(config, monkeypatc
     monkeypatch.setattr(
         "sp_mcp.web.bridge_call", lambda *args: (_ for _ in ()).throw(AssertionError("Unexpected write"))
     )
-    with TestClient(make_http_app(server, service, "127.0.0.1")) as client:
+    with TestClient(make_http_app(server, service, "127.0.0.1"), base_url="http://127.0.0.1") as client:
         assert client.post("/api/uvyazka_attach", json={}).status_code == 403
         assert (
             client.post(
@@ -40,6 +40,25 @@ def test_project_write_requires_same_origin_and_session_token(config, monkeypatc
             ).status_code
             == 403
         )
+
+
+def test_web_rejects_unknown_hosts_and_invalid_batch_values(config, monkeypatch):
+    monkeypatch.setenv("SP_MCP_ALLOWED_HOSTS", "standards.example")
+    server, service = create_server(config)
+    with TestClient(make_http_app(server, service, "127.0.0.1"), base_url="http://127.0.0.1") as client:
+        assert client.get("/health", headers={"Host": "standards.example"}).status_code == 200
+        assert (
+            client.get("/api/ui-config", headers={"Host": "other.example"}).json()["error_code"]
+            == "HOST_REJECTED"
+        )
+        assert client.post("/api/batch_check", json={"items": {}}).status_code == 400
+        assert client.post("/api/open", json={"url": {}}).json()["error_code"] == "INVALID_ARGUMENT"
+        assert client.post("/api/search", json={"query": "demo", "online": "false"}).status_code == 400
+        batch = client.post(
+            "/api/batch_check", json={"items": [1, {"input_id": "bad-code", "code": 3}]}
+        ).json()
+        assert [item["input_id"] for item in batch["items"]] == [None, "bad-code"]
+        assert all(item["result"]["error_code"] == "INVALID_ARGUMENT" for item in batch["items"])
         assert (
             client.post("/api/search", content="{}", headers={"Content-Type": "text/plain"}).status_code
             == 415
@@ -48,7 +67,10 @@ def test_project_write_requires_same_origin_and_session_token(config, monkeypatc
 
 def test_public_shell_does_not_bypass_data_authentication(config):
     server, service = create_server(config)
-    with TestClient(BearerMiddleware(make_http_app(server, service, "127.0.0.1"), "test-token")) as client:
+    with TestClient(
+        BearerMiddleware(make_http_app(server, service, "127.0.0.1"), "test-token"),
+        base_url="http://127.0.0.1",
+    ) as client:
         assert client.get("/").status_code == 200
         assert client.get("/api/ui-config").status_code == 401
         assert client.post("/api/library", json={}).status_code == 401

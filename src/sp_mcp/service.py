@@ -1,11 +1,12 @@
 import difflib
 import re
 from datetime import date, datetime, timedelta, timezone
+from itertools import islice
 from urllib.parse import urlencode, urljoin
 
 from .config import Config
 from .errors import NormsError
-from .identity import clean, designation, prefer_candidate
+from .identity import candidate_code, clean, designation, prefer_candidate
 from .linguistics import (
     catalog_anchor,
     catalog_queries,
@@ -15,13 +16,13 @@ from .linguistics import (
     subject_compatible,
     topic_relevance,
 )
-from .network import Network, validate_url
+from .network import Network, bounded_network, validate_url
 from .parsers import parse_candidates, parse_document, soup_for
 from .presentation import reading_blocks, table_caption
 from .retrieval import Retrieval
 from .storage import Store
 from .validity import observed_validity, validity_index
-from .verification import verify
+from .verification import today_moscow, verify
 
 CATALOGS = {
     "sp": "https://meganorm.ru/mega_doc/norm/sp_svod-pravil/sp_svod-pravil_0.html",
@@ -32,7 +33,7 @@ CATALOGS = {
 
 
 def bound(value, lower, upper, name):
-    if not lower <= value <= upper:
+    if type(value) is not int or not lower <= value <= upper:
         raise NormsError("INVALID_ARGUMENT", f"{name} must be {lower}..{upper}")
 
 
@@ -103,6 +104,7 @@ class Service:
         self.store.add_candidates(items)
         return self.store.save_catalog(fetched, {"items": items, "next_urls": sorted(set(next_urls))})
 
+    @bounded_network
     def browse(self, source="meganorm", catalog="sp", page=0, refresh=False):
         bound(page, 0, 1000, "page")
         if source != "meganorm" or catalog not in CATALOGS:
@@ -114,8 +116,9 @@ class Service:
         url = "https://new.gostinfo.ru/catalog?" + urlencode({"catalog": category, "q": query, "page": page})
         return self._catalog(url, refresh)
 
+    @bounded_network
     def search(
-        self, query, limit=20, page=1, online=True, refresh=False, mode="concept", include_inactive=False
+        self, query: str, limit=20, page=1, online=True, refresh=False, mode="concept", include_inactive=False
     ):
         query = clean(query)
         if not query or len(query) > 300:
@@ -291,7 +294,7 @@ class Service:
             if include_inactive or not observed_validity(initial_status, c)["hidden_by_default"]
         ]
         retrieval = self.retrieval.search(
-            query, mode=mode if not code else "lexical", limit=limit * 3, preferred_codes=preferred
+            query, mode=mode if not code else "lexical", limit=150, preferred_codes=preferred
         )
         text_hits = []
         for item in retrieval["items"]:
@@ -407,17 +410,28 @@ class Service:
 
             values, related = document_cards(values), document_cards(related)
         start = (page - 1) * limit
+        if code:
+            page_items = values[start : start + limit]
+            page_hits = text_hits[:limit] if page == 1 else []
+            total = len(values)
+        else:
+            codes = list(dict.fromkeys(item["code"] for item in values + text_hits))
+            visible = set(codes[start : start + limit])
+            page_items = [item for item in values if item["code"] in visible]
+            page_hits = [item for item in text_hits if item["code"] in visible]
+            total = len(codes)
         return {
             "status": "partial" if errors else "ok",
             "query": query,
             "page": page,
-            "items": values[start : start + limit],
-            "text_hits": text_hits[:limit],
-            "related_items": related[:limit],
-            "related_text_hits": related_text[:limit],
+            "items": page_items,
+            "text_hits": page_hits,
+            "related_items": related[:limit] if page == 1 else [],
+            "related_text_hits": related_text[:limit] if page == 1 else [],
             "source_errors": errors,
+            "result_offset": start,
             "search_provenance": provenance,
-            "more_results_possible": len(values) > start + limit,
+            "more_results_possible": total > start + limit,
             "retrieval": {k: v for k, v in retrieval.items() if k != "items"},
             "hydrated_snapshots": hydrated,
             "discovery_anchor": anchor,
@@ -427,7 +441,9 @@ class Service:
                 "unknown_status_policy": "visible_marked_unverified",
             },
             "coverage": "Discovered catalogue titles and saved source fragments; not the complete Russian normative corpus.",
-            "match_status": "candidate" if values or text_hits else "not_found_in_searched_sources",
+            "match_status": "candidate"
+            if values or text_hits
+            else ("search_incomplete" if errors else "not_found_in_searched_sources"),
         }
 
     def search_status(self):
@@ -445,12 +461,14 @@ class Service:
             "image_count": len(document["images"]),
         }
 
-    def open(self, url, refresh=False, latest_revision=False):
+    @bounded_network
+    def open(self, url: str, refresh=False, latest_revision=False):
         url = validate_url(url)
         cached = self.store.latest(url)
         use_cached = (
             cached
             and not refresh
+            and (cached["text_status"] != "extracted_pdf" or cached.get("identity_verified_from_cover"))
             and designation(cached.get("fields", {}).get("Обозначение", cached["title"])) == cached["code"]
             and (
                 datetime.now(timezone.utc) - datetime.fromisoformat(cached["provenance"]["checked_at"])
@@ -461,7 +479,10 @@ class Service:
             document = cached
         else:
             fetched = self.network.fetch(url)
-            document = self.store.save(fetched, parse_document(fetched))
+            related = self.store.candidate_at(url) if fetched["raw"].startswith(b"%PDF-") else None
+            document = self.store.save(
+                fetched, parse_document(fetched, expected_code=candidate_code(related) if related else None)
+            )
             if not fetched["raw"].startswith(b"%PDF-"):
                 self.store.add_candidates(parse_candidates(fetched))
         if latest_revision and document["revisions"]:
@@ -477,7 +498,7 @@ class Service:
                 }
         return self.summary(document)
 
-    def read(self, snapshot_id, offset=0, limit=12000, expected_sha256=None):
+    def read(self, snapshot_id: str, offset=0, limit=12000, expected_sha256=None):
         bound(offset, 0, 100000000, "offset")
         bound(limit, 1, 30000, "limit")
         document = self.store.get(snapshot_id, expected_sha256)
@@ -495,7 +516,7 @@ class Service:
             "limitations": document["limitations"],
         }
 
-    def outline(self, snapshot_id, offset=0, limit=40):
+    def outline(self, snapshot_id: str, offset=0, limit=40):
         bound(offset, 0, 1000000, "offset")
         bound(limit, 1, 100, "limit")
         document = self.store.get(snapshot_id)
@@ -509,7 +530,7 @@ class Service:
             "provenance": document["provenance"],
         }
 
-    def read_clause(self, snapshot_id, number, expected_sha256=None):
+    def read_clause(self, snapshot_id: str, number: str, expected_sha256=None):
         if not re.fullmatch(r"(?:[А-ЯA-Z]\.)?\d+(?:\.\d+)*", number):
             raise NormsError("INVALID_ARGUMENT", "number must be a literal clause number, e.g. 7.11.1")
         document = self.store.get(snapshot_id, expected_sha256)
@@ -551,14 +572,14 @@ class Service:
             "limitations": document["limitations"],
         }
 
-    def search_document(self, snapshot_id, query, offset=0, limit=10):
+    def search_document(self, snapshot_id: str, query: str, offset=0, limit=10):
         bound(offset, 0, 100000000, "offset")
         bound(limit, 1, 50, "limit")
         if not clean(query):
             raise NormsError("INVALID_ARGUMENT", "query is empty")
         document = self.store.get(snapshot_id)
         pattern = re.compile(r"\s+".join(re.escape(t) for t in query.split()), re.I)
-        matches = list(pattern.finditer(document["text"], offset))[: limit + 1]
+        matches = list(islice(pattern.finditer(document["text"], offset), limit + 1))
         return {
             "items": [
                 {
@@ -573,7 +594,7 @@ class Service:
             "provenance": document["provenance"],
         }
 
-    def table(self, snapshot_id, table_index, row_offset=0, limit=20):
+    def table(self, snapshot_id: str, table_index: int, row_offset=0, limit=20):
         bound(table_index, 0, 100000, "table_index")
         bound(row_offset, 0, 100000, "row_offset")
         bound(limit, 1, 100, "limit")
@@ -592,7 +613,8 @@ class Service:
             "merged_cells": "original source spans retained",
         }
 
-    def check(self, code, snapshot_id=None, as_of=None, refresh=True):
+    @bounded_network
+    def check(self, code: str, snapshot_id=None, as_of=None, refresh=True):
         normalized = designation(code)
         if not normalized or clean(code).upper().replace("—", "-") != normalized:
             raise NormsError("INVALID_ARGUMENT", "Pass a complete document designation without extra text")
@@ -604,7 +626,7 @@ class Service:
                     "code": normalized,
                     "verification": "unconfirmed",
                     "document_status": "unconfirmed",
-                    "as_of": as_of or date.today().isoformat(),
+                    "as_of": as_of or today_moscow().isoformat(),
                     "snapshot_id": snapshot_id,
                     "reason": "No official status adapter implemented for this document family",
                     "applicability": "not_assessed",
@@ -623,8 +645,16 @@ class Service:
                     try:
                         summary = self.open(item["url"], refresh=refresh)
                         doc = self.store.get(summary["snapshot_id"])
-                        if doc["authority"] == "official_catalog" and doc["code"] == normalized:
-                            cards.append(doc)
+                        if (
+                            doc["authority"] != "official_catalog"
+                            or doc["code"] != normalized
+                            or doc.get("change_number") != item.get("change_number")
+                        ):
+                            raise NormsError(
+                                "OFFICIAL_CARD_IDENTITY_MISMATCH",
+                                "Official card does not match its catalogue listing",
+                            )
+                        cards.append(doc)
                     except NormsError as exc:
                         errors.append({"url": item["url"], **exc.payload()})
                 if not result["next_urls"]:
@@ -647,14 +677,19 @@ class Service:
         result["snapshot_id"] = snapshot_id
         return self.store.save_verification(result)
 
-    def batch_check(self, items, as_of=None, refresh=True):
+    @bounded_network
+    def batch_check(self, items: list, as_of=None, refresh=True):
+        if not isinstance(items, list):
+            raise NormsError("INVALID_ARGUMENT", "items must be a JSON array")
         bound(len(items), 1, 10, "items count")
         results = []
         for item in items:
-            input_id = item.get("input_id")
+            input_id = item.get("input_id") if isinstance(item, dict) else None
             try:
-                if input_id is None or not item.get("code"):
+                if input_id is None or not isinstance(item.get("code"), str) or not item["code"]:
                     raise NormsError("INVALID_ARGUMENT", "Each item requires input_id and code")
+                if item.get("snapshot_id") is not None and not isinstance(item["snapshot_id"], str):
+                    raise NormsError("INVALID_ARGUMENT", "snapshot_id must be a string")
                 result = self.check(item["code"], item.get("snapshot_id"), as_of, refresh)
             except (NormsError, ValueError) as exc:
                 result = (
@@ -665,7 +700,7 @@ class Service:
             results.append({"input_id": input_id, "result": result})
         return {"items": results}
 
-    def compare(self, left_snapshot_id, right_snapshot_id, offset=0, limit=100):
+    def compare(self, left_snapshot_id: str, right_snapshot_id: str, offset=0, limit=100):
         bound(offset, 0, 1000000, "offset")
         bound(limit, 1, 300, "limit")
         left, right = self.store.get(left_snapshot_id), self.store.get(right_snapshot_id)
@@ -706,7 +741,7 @@ class Service:
         }
         return result
 
-    def document(self, snapshot_id):
+    def document(self, snapshot_id: str):
         doc = self.store.get(snapshot_id)
         return self.summary(doc) | {
             "table_captions": [
@@ -719,7 +754,7 @@ class Service:
             ),
         }
 
-    def contents(self, snapshot_id, expanded=False, query="", offset=0, limit=300):
+    def contents(self, snapshot_id: str, expanded=False, query="", offset=0, limit=300):
         from .contents import document_contents
 
         bound(offset, 0, 100000, "offset")

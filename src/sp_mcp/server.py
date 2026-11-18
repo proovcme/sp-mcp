@@ -77,7 +77,8 @@ def create_server(config):
         Optional hybrid/semantic modes require a separately configured local embedding index; no generation API.
         Explicitly inactive documents are hidden by default; include_inactive restores historical results.
         Unknown or conflicting status remains visible and is never labelled active.
-        Page is the official search page; inspect source_errors and search coverage.
+        Page is a slice of the merged result, independent of bounded catalogue discovery.
+        Inspect source_errors and search coverage.
         """
         return service.search(query, limit, page, online, refresh, mode, include_inactive)
 

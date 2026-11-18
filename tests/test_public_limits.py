@@ -38,6 +38,8 @@ def test_busy_public_server_rejects_without_queue_and_keeps_health_available(tmp
             release.set()
         assert pending.result().status_code == 200
         assert guard.active == guard.heavy_active == 0
+        assert client.post("/mcp", json={}).status_code == 404
+        assert client.post("/api/uvyazka_prepare", json={}).status_code == 404
 
 
 def test_per_client_heavy_rate_recovers_after_minute_and_cache_is_bounded(tmp_path):

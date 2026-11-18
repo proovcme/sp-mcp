@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import pytest
 from conftest import fetched
 
@@ -67,3 +69,72 @@ def test_list_excerpt_keeps_scope_exclusion_and_literal_offsets(config):
     assert hit["scope_exclusion"] is True
     assert hit["clause"] == "1.2"
     assert doc["text"][hit["start"] : hit["end"]] == hit["text"]
+
+
+def test_index_updates_only_changed_documents_and_removes_old_derived_rows(config, monkeypatch):
+    service = Service(config)
+    first = fetched("""<title>СП 900.100.2099. Учебный документ</title>
+    <div>7.1 Синтетический прежний текст для проверки поискового индекса и очистки старых данных.</div>""")
+    new = fetched("""<title>СП 900.100.2099. Учебный документ (ред. от 01.01.2099)</title>
+    <div>7.1 Синтетическая новая редакция для проверки поискового индекса и обновления результатов.</div>""")
+    old = service.store.save(first, parse_document(first))
+    service.retrieval.sync()
+    with service.store.db() as db:
+        old_entry = db.execute("SELECT id FROM retrieval_segments WHERE kind='text'").fetchone()[0]
+        db.execute("INSERT INTO retrieval_vectors VALUES (?, 'synthetic', x'00')", (old_entry,))
+    with monkeypatch.context() as patch:
+        patch.setattr(service.store, "get", lambda *args: pytest.fail("Warm index reopened a snapshot"))
+        assert service.retrieval.search("прежний", mode="lexical")["items"]
+    # A separate service can save changes to the same shared database.
+    replacement = Service(config).store.save(new, parse_document(new))
+    hits = service.retrieval.search("редакция", mode="lexical")["items"]
+    assert [hit["snapshot_id"] for hit in hits] == [replacement["snapshot_id"]]
+    assert not service.retrieval.search("прежний", mode="lexical")["items"]
+    with service.store.db() as db:
+        assert db.execute("SELECT count(*) FROM retrieval_vectors").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM retrieval_fts").fetchone()[0] == 1
+    assert service.store.get(old["snapshot_id"])["snapshot_id"] == old["snapshot_id"]
+
+
+def test_search_pages_group_fragments_with_documents(config):
+    service = Service(config)
+    for number in range(900, 903):
+        raw = fetched(
+            f"""<title>СП {number}.100.2099. Бытовая канализация</title>
+        <div>7.1 Бытовая канализация описана в синтетическом примере для проверки постраничной выдачи.</div>""",
+            f"https://meganorm.ru/mega_doc/norm/sp/0/demo-{number}.html",
+        )
+        service.store.save(raw, parse_document(raw))
+    found = set()
+    for page in range(1, 4):
+        result = service.search("бытовая канализация", online=False, page=page, limit=1)
+        assert len(result["text_hits"]) == 1
+        code = result["text_hits"][0]["code"]
+        assert code not in found
+        found.add(code)
+        assert result["more_results_possible"] is (page < 3)
+
+
+def test_index_build_reads_snapshots_in_its_write_transaction(config, monkeypatch):
+    service = Service(config)
+    connect = service.store.db
+
+    @contextmanager
+    def small_cache():
+        with connect() as db:
+            db.execute("PRAGMA cache_size=8")
+            db.execute("PRAGMA busy_timeout=50")
+            yield db
+
+    monkeypatch.setattr(service.store, "db", small_cache)
+    for number in (900, 901):
+        paragraphs = "".join(
+            f"<p>7.{i} Синтетическое требование проверяет индексацию сохранённых документов.</p>"
+            for i in range(200)
+        )
+        raw = fetched(
+            f"<title>СП {number}.100.2099</title>{paragraphs}",
+            f"https://meganorm.ru/mega_doc/norm/sp/0/demo-{number}.html",
+        )
+        service.store.save(raw, parse_document(raw))
+    assert service.retrieval.search("синтетическое")["index"]["total_segments"] == 400
