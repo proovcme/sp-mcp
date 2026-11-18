@@ -1,7 +1,7 @@
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from conftest import fetched, ros_empty_catalogue
+from conftest import fcs_empty_catalogue, fetched, ros_empty_catalogue
 
 from sp_mcp.config import Config
 from sp_mcp.parsers import parse_candidates, parse_document
@@ -11,6 +11,8 @@ from sp_mcp.service import Service
 def test_cold_search_finds_russian_inflection_without_model_or_preloaded_corpus(tmp_path, monkeypatch):
     class Network:
         def fetch(self, url):
+            if url.startswith("https://api.faufcc.ru/"):
+                return fcs_empty_catalogue(url)
             if urlsplit(url).hostname == "protect.gost.ru":
                 return ros_empty_catalogue(url)
             if "new.gostinfo.ru/catalog?" in url and "%D0%BF%D0%BE%D0%B6%D0%B0%D1%80" in url:
@@ -43,6 +45,8 @@ def test_sewer_search_discovers_internal_and_external_design_documents(config, m
 
     class Network:
         def fetch(self, url):
+            if url.startswith("https://api.faufcc.ru/"):
+                return fcs_empty_catalogue(url)
             if urlsplit(url).hostname == "protect.gost.ru":
                 return ros_empty_catalogue(url)
             requests.append(url)
@@ -165,6 +169,8 @@ def test_document_pagination_does_not_count_duplicate_discovery_links(config):
 def test_smoke_concept_discovers_fire_ventilation_document_without_keyword_in_title(config, monkeypatch):
     class Network:
         def fetch(self, url):
+            if url.startswith("https://api.faufcc.ru/"):
+                return fcs_empty_catalogue(url)
             if urlsplit(url).hostname == "protect.gost.ru":
                 return ros_empty_catalogue(url)
             if (

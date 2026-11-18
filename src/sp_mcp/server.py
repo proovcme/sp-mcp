@@ -72,7 +72,7 @@ def create_server(config):
         include_inactive: bool = False,
     ) -> dict:
         """Search by full designation or words. Returns candidates, never confirmed applicability.
-        Online search queries Rosstandard and Gostinfo SP/GOST metadata and bounded MegaNorm catalogues.
+        Online search queries Rosstandard and Gostinfo metadata, the FCS SP registry and bounded MegaNorm catalogues.
         Default concept mode uses Russian morphology, BM25, spelling corrections and a curated lexicon, no model.
         Optional hybrid/semantic modes require a separately configured local embedding index; no generation API.
         Explicitly inactive documents are hidden by default; include_inactive restores historical results.
@@ -93,10 +93,10 @@ def create_server(config):
 
     @tool(read)
     def sp_open_document(url: str, refresh: bool = False, latest_revision: bool = False) -> dict:
-        """Open a discovered HTTPS Rosstandard/Gostinfo card or MegaNorm source, saving immutable source bytes.
+        """Open an original FCS PDF, a Rosstandard/Gostinfo card or a MegaNorm source. Saves immutable source bytes.
         Returns snapshot_id, edition metadata, revision links, table counts and SHA-256.
         latest_revision follows newest linked edition; it does not certify its effective date.
-        Official catalogue cards are metadata_only. PDF tables/formulae need visual verification.
+        Official catalogue cards are metadata_only. PDF pages link to the original. PDF extraction requires a text layer.
         """
         return service.open(url, refresh, latest_revision)
 

@@ -66,6 +66,8 @@ def reading_blocks(document, root, start, end):
             "kind": block["kind"],
             "text": document["text"][max(start, block["start"]) : min(end, block["end"])],
         }
+        if "page_number" in block:
+            item["page_number"] = block["page_number"]
         if block["kind"] == "table" and "table_index" in block:
             table = document["tables"][block["table_index"]]
             preview = table["rows"][:20]

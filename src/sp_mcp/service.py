@@ -3,9 +3,9 @@ import re
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from itertools import islice
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlsplit
 
-from . import rosstandard
+from . import faufcc, rosstandard
 from .config import Config
 from .errors import NormsError
 from .identity import candidate_code, clean, designation, prefer_candidate
@@ -60,6 +60,16 @@ class Service:
                     ],
                 },
                 {
+                    "id": "faufcc",
+                    "role": "official_construction_sp_originals_and_amendment_files",
+                    "url": faufcc.REGISTRY,
+                    "limitations": [
+                        "Public construction SP registry. Original PDFs are opened on demand.",
+                        "Scanned PDFs can be opened at the source. Automatic extraction requires a text layer.",
+                        "Separate amendment PDFs are never applied to the base text automatically.",
+                    ],
+                },
+                {
                     "id": "rosstandard",
                     "role": "official_federal_fund_status_replacements_and_amendments",
                     "url": f"{rosstandard.ORIGIN}/",
@@ -102,10 +112,13 @@ class Service:
                 self.store.add_candidates(cached["items"])
                 return cached
         fetched = self.network.fetch(url)
-        soup = soup_for(fetched)
-        if source_for(fetched["url"])[0] == "rosstandard":
-            items, next_urls = rosstandard.catalogue(fetched, soup)
+        source = source_for(fetched["url"])[0]
+        if source == "faufcc":
+            items, next_urls = faufcc.catalogue(fetched)
+        elif source == "rosstandard":
+            items, next_urls = rosstandard.catalogue(fetched, soup_for(fetched))
         else:
+            soup = soup_for(fetched)
             items = parse_candidates(fetched)
             next_urls = []
             for a in soup.find_all("a", href=True):
@@ -116,8 +129,15 @@ class Service:
                         next_urls.append(href)
         for item in items:
             item["discovery_sha256"] = __import__("hashlib").sha256(fetched["raw"]).hexdigest()
+        unavailable = []
+        if source == "faufcc":
+            unavailable = [item for item in items if not item["original_pdf"]]
+            items = [item for item in items if item["original_pdf"]]
         self.store.add_candidates(items)
-        return self.store.save_catalog(fetched, {"items": items, "next_urls": sorted(set(next_urls))})
+        result = {"items": items, "next_urls": sorted(set(next_urls))}
+        if unavailable:
+            result["records_without_pdf"] = unavailable
+        return self.store.save_catalog(fetched, result)
 
     @bounded_network
     def browse(self, source="meganorm", catalog="sp", page=0, refresh=False):
@@ -174,6 +194,13 @@ class Service:
                     provenance.append(result["provenance"])
                 except NormsError as exc:
                     errors.append({"source": "gostinfo", **exc.payload()})
+            if "sp" in categories:
+                try:
+                    result = self._catalog(faufcc.search_url(code or anchor or query, 1), refresh)
+                    remote.extend(result["items"])
+                    provenance.append(result["provenance"])
+                except NormsError as exc:
+                    errors.append({"source": "faufcc", **exc.payload()})
             # The official q parameter is literal substring matching, not morphology.
             if not code:
                 if anchor and anchor != query.casefold():
@@ -235,6 +262,7 @@ class Service:
             key=lambda item: (
                 item["code"] != code if code else -relevance(query, item["title"]),
                 item.get("change_number") is not None,
+                bool(code) and item["source"] != "faufcc",
             )
         )
         hydrated = []
@@ -424,7 +452,7 @@ class Service:
                         key=lambda item: (
                             not bool(item.get("snapshot_id")),
                             item.get("change_number") is not None,
-                            {"rosstandard": 0, "gostinfo": 1}.get(item["source"], 2),
+                            {"faufcc": 0, "rosstandard": 1, "gostinfo": 2}.get(item["source"], 3),
                             -len(item["title"]),
                         ),
                     )
@@ -495,6 +523,9 @@ class Service:
     @bounded_network
     def open(self, url: str, refresh=False, latest_revision=False):
         url = validate_url(url)
+        source = source_for(url)[0]
+        if source == "faufcc" and not faufcc.ASSET.fullmatch(urlsplit(url).path):
+            raise NormsError("NOT_A_DOCUMENT", "Open a PDF from the FCS registry")
         cached = self.store.latest(url)
         use_cached = (
             cached
@@ -512,9 +543,13 @@ class Service:
         else:
             fetched = self.network.fetch(url)
             related = self.store.candidate_at(url) if fetched["raw"].startswith(b"%PDF-") else None
-            document = self.store.save(
-                fetched, parse_document(fetched, expected_code=candidate_code(related) if related else None)
-            )
+            parsed = parse_document(fetched, expected_code=candidate_code(related) if related else None)
+            if source == "faufcc":
+                if parsed["source"] != source or (related and parsed["change_number"] is not None):
+                    raise NormsError("DISCOVERY_IDENTITY_MISMATCH", "FCS original does not match the listing")
+                if related:
+                    parsed["title"] = related["title"]
+            document = self.store.save(fetched, parsed)
             if not fetched["raw"].startswith(b"%PDF-"):
                 self.store.add_candidates(parse_candidates(fetched))
         if latest_revision and document["revisions"]:
@@ -690,7 +725,46 @@ class Service:
         result["search_evidence"] = search_evidence
         result["source_coverage"] = coverage
         result["snapshot_id"] = snapshot_id
+        if category == "sp":
+            result["publisher"] = self._check_fcs(normalized, cards, refresh)
         return self.store.save_verification(result)
+
+    def _check_fcs(self, code, cards, refresh):
+        result = {
+            "source": "faufcc",
+            "registry_url": faufcc.REGISTRY,
+            "originals": [],
+            "evidence": [],
+            "errors": [],
+        }
+        files = []
+        try:
+            listing = self._catalog(faufcc.search_url(code, 1), refresh)
+            result["evidence"].append(listing["provenance"])
+            entries = {
+                item["registry_entry_url"]: item
+                for item in listing["items"] + listing.get("records_without_pdf", [])
+                if item["code"] == code
+            }
+            result["complete"] = len(entries) <= 2 and not listing["next_urls"]
+            for url, item in list(entries.items())[:2]:
+                if item["original_pdf"]:
+                    result["originals"].append({"url": item["original_pdf"], "title": item["title"]})
+                saved = self.store.catalog(url) if not refresh else None
+                try:
+                    if not saved:
+                        fetched = self.network.fetch(url)
+                        saved = self.store.save_catalog(
+                            fetched, {"files": faufcc.amendment_files(fetched, code)}
+                        )
+                    result["evidence"].append(saved["provenance"])
+                    files.extend(saved["files"])
+                except NormsError as exc:
+                    result["errors"].append({"url": url, **exc.payload()})
+        except NormsError as exc:
+            result["errors"].append(exc.payload())
+        result["complete"] = result.get("complete", False) and not result["errors"]
+        return result | faufcc.reconcile(files, cards)
 
     def _check_catalogue(self, source, search_catalogue, code, category, refresh, evidence):
         cards, errors = [], []

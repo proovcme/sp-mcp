@@ -15,9 +15,12 @@ import httpx
 import truststore
 
 from .errors import NormsError
+from .faufcc import ASSET, ENTRIES, ENTRY
+from .faufcc import HOST as FCS_HOST
 from .storage import now
 
-HOSTS = {"meganorm.ru", "new.gostinfo.ru", "www.gostinfo.ru", "gostinfo.ru", "protect.gost.ru"}
+HOSTS = {"meganorm.ru", "new.gostinfo.ru", "www.gostinfo.ru", "gostinfo.ru", "protect.gost.ru", FCS_HOST}
+GZIP_HOSTS = {"protect.gost.ru", FCS_HOST}
 
 
 def validate_url(url):
@@ -32,6 +35,12 @@ def validate_url(url):
         )
     if re.search(r"(?:%2f|%5c|%2e)", p.path, re.I) or ".." in p.path.split("/"):
         raise NormsError("URL_NOT_ALLOWED", "Encoded or parent path segments are not accepted")
+    if p.hostname == FCS_HOST and not (
+        p.path in {ENTRIES, "/robots.txt"} or ENTRY.fullmatch(p.path) or ASSET.fullmatch(p.path)
+    ):
+        raise NormsError(
+            "URL_NOT_ALLOWED", "Only public FCS registry entries and original assets are supported"
+        )
     return urldefrag(url)[0]
 
 
@@ -77,8 +86,8 @@ class Network:
     async def _download(self, url, timeout):
         headers = {
             "User-Agent": self.config.user_agent,
-            "Accept": "text/html,application/pdf,text/plain,application/xml",
-            "Accept-Encoding": "gzip" if urlsplit(url).hostname == "protect.gost.ru" else "identity",
+            "Accept": "text/html,application/pdf,application/json,text/plain,application/xml",
+            "Accept-Encoding": "gzip" if urlsplit(url).hostname in GZIP_HOSTS else "identity",
         }
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(
@@ -147,7 +156,7 @@ class Network:
         self.last = time.monotonic()
         loop = asyncio.new_event_loop()
         try:
-            source_timeout = 8 if urlsplit(url).hostname == "protect.gost.ru" else self.config.timeout
+            source_timeout = 8 if urlsplit(url).hostname in GZIP_HOSTS else self.config.timeout
             return loop.run_until_complete(
                 self._download(url, min(source_timeout, self.config.timeout, remaining))
             )

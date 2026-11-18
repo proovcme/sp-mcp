@@ -43,3 +43,7 @@ def ros_empty_catalogue(url):
     return fetched(
         f'<form method="GET" action="{path}"><input name="search"></form><h3>Документы не найдены</h3>', url
     )
+
+
+def fcs_empty_catalogue(url):
+    return fetched('{"data":[],"meta":{"pagination":{"currentPage":1,"totalPages":1}}}', url)

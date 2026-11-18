@@ -5,7 +5,7 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
-from . import rosstandard
+from . import faufcc, rosstandard
 from .errors import NormsError
 from .identity import CODE, change_number, clean, designation, parse_date, status_value
 from .network import decode
@@ -21,6 +21,8 @@ def source_for(url):
         return "meganorm", "secondary"
     if host == "protect.gost.ru":
         return "rosstandard", "official_catalog"
+    if host == faufcc.HOST:
+        return "faufcc", "official_publisher"
     return "gostinfo", "official_catalog"
 
 
@@ -70,6 +72,8 @@ def parse_document(fetched, *, expected_code=None):
         return rosstandard.document(fetched, soup_for(fetched))
     if fetched["raw"].startswith(b"%PDF-"):
         return parse_pdf(fetched, expected_code=expected_code)
+    if source_for(fetched["url"])[0] == "faufcc":
+        raise NormsError("NOT_A_DOCUMENT", "FCS did not return an original PDF")
     soup = soup_for(fetched)
     source, authority = source_for(fetched["url"])
     root = soup.find("main") or soup.body or soup
@@ -209,10 +213,13 @@ def parse_document(fetched, *, expected_code=None):
     }
 
 
-def pdf_cover_identity(cover, title, expected_code=None):
+def pdf_cover_identity(cover, title, expected_code=None, *, sp_edition=False):
     # Body references do not identify a PDF. Use a designation on its own cover line
     # or one that starts an explicit PDF title, and reject contradictory cover evidence.
     lines = [clean(line) for line in cover[:4000].splitlines() if line.strip()]
+    if sp_edition:
+        lines = [re.sub(r"^СВОД ПРАВИЛ\s+", "", line, flags=re.I) for line in lines]
+        lines = [line for line in lines if not line.upper().startswith("СНИП ")]
     cover_codes = {designation(line) for line in lines if CODE.fullmatch(line)}
     for family, number in zip(lines, lines[1:]):
         joined = family + " " + number
@@ -228,13 +235,33 @@ def pdf_cover_identity(cover, title, expected_code=None):
     return cover_codes.pop()
 
 
+def fcs_pdf_identity(cover, title, expected_code):
+    amendments = {
+        (designation(line), number)
+        for line in cover[:1500].splitlines() + [title or ""]
+        if (number := change_number(line)) is not None
+    }
+    if not amendments:
+        return pdf_cover_identity(cover, title, expected_code, sp_edition=True), None
+    if len(amendments) == 1:
+        code, number = amendments.pop()
+        if code and code.startswith("СП ") and expected_code in (None, code):
+            return code, number
+    raise NormsError("PDF_IDENTITY_UNRESOLVED", "Cannot identify the FCS amendment on the cover")
+
+
 def parse_pdf(fetched, *, expected_code=None):
+    source, authority = source_for(fetched["url"])
     try:
         reader = PdfReader(io.BytesIO(fetched["raw"]))
         if reader.is_encrypted or len(reader.pages) > 300:
             raise NormsError("PDF_LIMIT", "Encrypted PDFs and PDFs over 300 pages require separate intake")
         cover = (reader.pages[0].extract_text() or "") if reader.pages else ""
-        code = pdf_cover_identity(cover, reader.metadata.title if reader.metadata else None, expected_code)
+        title = reader.metadata.title if reader.metadata else None
+        if source == "faufcc":
+            code, number = fcs_pdf_identity(cover, title, expected_code)
+        else:
+            code, number = pdf_cover_identity(cover, title, expected_code), None
         blocks, position = [], 0
         for i, page in enumerate(reader.pages):
             text = (page.extract_text() or "") if i else cover
@@ -254,13 +281,16 @@ def parse_pdf(fetched, *, expected_code=None):
     except Exception as exc:
         raise NormsError("PDF_PARSE_ERROR", f"PDF could not be read ({type(exc).__name__})") from exc
     text = "\n".join(b["text"] for b in blocks)
-    source, authority = source_for(fetched["url"])
+    if not text.strip():
+        raise NormsError("PDF_TEXT_UNAVAILABLE", "PDF has no readable text layer")
+    if source == "faufcc" and not code.startswith("СП "):
+        raise NormsError("PDF_IDENTITY_UNRESOLVED", "The FCS PDF does not identify a construction SP")
     return {
         "source": source,
         "authority": authority,
         "code": code,
-        "title": code,
-        "change_number": None,
+        "title": f"Изменение № {number} к {code}" if number is not None else code,
+        "change_number": number,
         "fields": {"Обозначение": code},
         "identity_verified_from_cover": True,
         "raw_status": "",
