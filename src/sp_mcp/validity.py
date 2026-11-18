@@ -50,6 +50,19 @@ def validity_index(store, freshness_days=7):
         item["code"] = candidate_code(item)
         if item.get("authority") != "official_catalog" or item.get("change_number") is not None:
             continue
+        if item.get("source") == "rosstandard":
+            state = item.get("declared_status")
+            if state and state != "unknown":
+                add(
+                    item["code"],
+                    state,
+                    2,
+                    item.get("discovered_at"),
+                    item["url"],
+                    "official_catalog_label",
+                    item.get("raw_status", ""),
+                )
+            continue
         match = re.match(
             re.escape(item["code"])
             + r"\s+(Действует|Отмен[её]н|Замен[её]н|Утратил силу|Не действует|Не введ[её]н)\b",
@@ -136,6 +149,7 @@ def validity_index(store, freshness_days=7):
     for code, items in observations.items():
         priority = max(item["priority"] for item in items)
         current = [item for item in items if item["priority"] == priority]
+        current = [item for item in current if item["state"] != "unknown"] or current
         states = {item["state"] for item in current}
         if len(states) > 1:
             result[code] = {"state": "conflict", "hidden_by_default": False, "evidence": current}

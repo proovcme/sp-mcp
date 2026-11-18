@@ -3,6 +3,8 @@ import re
 import ssl
 import threading
 import time
+import zlib
+from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -76,7 +78,7 @@ class Network:
         headers = {
             "User-Agent": self.config.user_agent,
             "Accept": "text/html,application/pdf,text/plain,application/xml",
-            "Accept-Encoding": "identity",
+            "Accept-Encoding": "gzip" if urlsplit(url).hostname == "protect.gost.ru" else "identity",
         }
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(
@@ -93,15 +95,35 @@ class Network:
                             http_status=code,
                             retryable=code == 429 or code >= 500,
                         )
-                    if response.headers.get("content-encoding", "identity").lower() != "identity":
-                        raise NormsError(
-                            "UNEXPECTED_ENCODING", "Source ignored the uncompressed download request"
-                        )
+                    encoding = response.headers.get("content-encoding", "identity").lower()
+                    if encoding not in {"identity", headers["Accept-Encoding"]}:
+                        raise NormsError("UNEXPECTED_ENCODING", "Source returned an unsupported encoding")
+                    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
                     raw = bytearray()
-                    async for chunk in response.aiter_raw(chunk_size=65536):
-                        if len(raw) + len(chunk) > self.config.max_bytes:
-                            raise NormsError("RESPONSE_TOO_LARGE", "Source exceeds bounded download limit")
-                        raw.extend(chunk)
+                    wire_length = 0
+                    async with aclosing(response.aiter_raw(chunk_size=65536)) as raw_stream:
+                        async for chunk in raw_stream:
+                            wire_length += len(chunk)
+                            if wire_length > self.config.max_bytes:
+                                raise NormsError(
+                                    "RESPONSE_TOO_LARGE", "Source exceeds bounded download limit"
+                                )
+                            if inflater:
+                                try:
+                                    chunk = inflater.decompress(chunk, self.config.max_bytes - len(raw) + 1)
+                                except zlib.error as exc:
+                                    raise NormsError(
+                                        "SOURCE_ENCODING_ERROR", "Malformed gzip transfer"
+                                    ) from exc
+                            if len(raw) + len(chunk) > self.config.max_bytes or (
+                                inflater and inflater.unconsumed_tail
+                            ):
+                                raise NormsError(
+                                    "RESPONSE_TOO_LARGE", "Source exceeds bounded download limit"
+                                )
+                            raw.extend(chunk)
+                    if inflater and (not inflater.eof or inflater.unused_data):
+                        raise NormsError("SOURCE_ENCODING_ERROR", "Incomplete or unexpected gzip transfer")
                     return {
                         "url": url,
                         "raw": bytes(raw),
@@ -125,7 +147,10 @@ class Network:
         self.last = time.monotonic()
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(self._download(url, min(self.config.timeout, remaining)))
+            source_timeout = 8 if urlsplit(url).hostname == "protect.gost.ru" else self.config.timeout
+            return loop.run_until_complete(
+                self._download(url, min(source_timeout, self.config.timeout, remaining))
+            )
         except (httpx.HTTPError, TimeoutError, OSError) as exc:
             if budget:
                 budget.remaining()

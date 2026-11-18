@@ -5,6 +5,7 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+from . import rosstandard
 from .errors import NormsError
 from .identity import CODE, change_number, clean, designation, parse_date, status_value
 from .network import decode
@@ -15,14 +16,21 @@ def soup_for(fetched):
 
 
 def source_for(url):
-    if urlsplit(url).hostname == "meganorm.ru":
+    host = urlsplit(url).hostname
+    if host == "meganorm.ru":
         return "meganorm", "secondary"
+    if host == "protect.gost.ru":
+        return "rosstandard", "official_catalog"
     return "gostinfo", "official_catalog"
 
 
 def parse_candidates(fetched):
     soup = soup_for(fetched)
     source, authority = source_for(fetched["url"])
+    if source == "rosstandard":
+        if rosstandard.card_kind(fetched["url"]):
+            return rosstandard.amendment_candidates(fetched, soup)[0]
+        return rosstandard.catalogue(fetched, soup)[0]
     items, seen = [], set()
     for a in soup.find_all("a", href=True):
         url = urljoin(fetched["url"], a["href"])
@@ -58,6 +66,8 @@ def parse_candidates(fetched):
 
 
 def parse_document(fetched, *, expected_code=None):
+    if source_for(fetched["url"])[0] == "rosstandard":
+        return rosstandard.document(fetched, soup_for(fetched))
     if fetched["raw"].startswith(b"%PDF-"):
         return parse_pdf(fetched, expected_code=expected_code)
     soup = soup_for(fetched)

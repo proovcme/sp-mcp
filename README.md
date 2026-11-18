@@ -3,7 +3,7 @@
 [![Checks](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/proovcme/sp-mcp/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)](CHANGELOG.md)
 
 **Найти норматив. Прочитать пункт. Проверить редакцию. Сохранить основание в проекте.**
 
@@ -35,7 +35,7 @@ flowchart LR
 
 ## Возможности
 
-- Поиск СП/ГОСТ по обозначению и словам в официальных каталогах Российского института стандартизации.
+- Поиск СП/ГОСТ по обозначению и словам в Федеральном фонде стандартов Росстандарта и каталоге Российского института стандартизации.
 - Поиск по заголовкам обнаруженных документов МегаНорма и по тексту локально открытых документов.
 - Открытие HTML/PDF, сохранение исходных байтов, SHA-256 и независимых снимков извлечения.
 - Чтение пунктов, поиск по документу, таблицы HTML с исходными объединениями ячеек.
@@ -80,8 +80,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 codex mcp add sp --env PYTHONUTF8=1 -- uvx --from git+https://github.com/proovcme/sp-mcp.git sp-mcp
 ```
 
-Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.6`:
-`git+https://github.com/proovcme/sp-mcp.git@v0.2.6`.
+Для воспроизводимой установки вместо ветки можно использовать тег `v0.2.7`:
+`git+https://github.com/proovcme/sp-mcp.git@v0.2.7`.
 
 Для разработки:
 
@@ -112,7 +112,7 @@ uv run sp-mcp sources
 ```bash
 uv run sp-mcp web
 # или из опубликованной версии:
-uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.6 sp-mcp web
+uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.7 sp-mcp web
 ```
 
 Откройте **http://127.0.0.1:8767/**. Это интерфейс той же SQLite-базы, которой пользуется MCP.
@@ -173,6 +173,8 @@ uvx --from git+https://github.com/proovcme/sp-mcp.git@v0.2.6 sp-mcp web
 | `sp_attach_uvyazka_link` | Запись версии анализа в выбранный проект |
 
 ## Источники и ограничения
+
+[Обзор официальных источников и доступности текстов](docs/SOURCES.md). `sp_browse_catalog(source="rosstandard", catalog="sp" | "gost")` листает фонд. Проверка статуса возвращает `source_coverage`, ссылки на обе группы официальных карточек и сведения о замене, если они опубликованы. Росстандарт подключён как источник метаданных; полный текст следует открывать через портал.
 
 **МегаНорм:** вторичный источник текста, справочных сведений и ссылок на редакции.
 Разные разделы и обновления могут содержать разные редакции одного документа.

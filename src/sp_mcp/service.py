@@ -1,9 +1,11 @@
 import difflib
 import re
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from itertools import islice
 from urllib.parse import urlencode, urljoin
 
+from . import rosstandard
 from .config import Config
 from .errors import NormsError
 from .identity import candidate_code, clean, designation, prefer_candidate
@@ -17,7 +19,7 @@ from .linguistics import (
     topic_relevance,
 )
 from .network import Network, bounded_network, validate_url
-from .parsers import parse_candidates, parse_document, soup_for
+from .parsers import parse_candidates, parse_document, soup_for, source_for
 from .presentation import reading_blocks, table_caption
 from .retrieval import Retrieval
 from .storage import Store
@@ -58,6 +60,16 @@ class Service:
                     ],
                 },
                 {
+                    "id": "rosstandard",
+                    "role": "official_federal_fund_status_replacements_and_amendments",
+                    "url": f"{rosstandard.ORIGIN}/",
+                    "catalogs": {key: f"{rosstandard.ORIGIN}/{key}/" for key in ("sp", "gost")},
+                    "limitations": [
+                        "Public catalogue and bibliographic cards. Read official documents in the source viewer.",
+                        "The viewer is not scraped; a bibliographic card is not a full document.",
+                    ],
+                },
+                {
                     "id": "gostinfo",
                     "role": "official_catalog_status_and_amendments",
                     "url": "https://new.gostinfo.ru/catalog/",
@@ -90,15 +102,18 @@ class Service:
                 self.store.add_candidates(cached["items"])
                 return cached
         fetched = self.network.fetch(url)
-        items = parse_candidates(fetched)
         soup = soup_for(fetched)
-        next_urls = []
-        for a in soup.find_all("a", href=True):
-            label = clean(a.get_text(" ", strip=True))
-            href = urljoin(fetched["url"], a["href"])
-            if "Следующая" in label or re.search(r"_\d+\.html$", href) and label.isdigit():
-                if href != url:
-                    next_urls.append(href)
+        if source_for(fetched["url"])[0] == "rosstandard":
+            items, next_urls = rosstandard.catalogue(fetched, soup)
+        else:
+            items = parse_candidates(fetched)
+            next_urls = []
+            for a in soup.find_all("a", href=True):
+                label = clean(a.get_text(" ", strip=True))
+                href = urljoin(fetched["url"], a["href"])
+                if "Следующая" in label or re.search(r"_\d+\.html$", href) and label.isdigit():
+                    if href != url:
+                        next_urls.append(href)
         for item in items:
             item["discovery_sha256"] = __import__("hashlib").sha256(fetched["raw"]).hexdigest()
         self.store.add_candidates(items)
@@ -107,14 +122,21 @@ class Service:
     @bounded_network
     def browse(self, source="meganorm", catalog="sp", page=0, refresh=False):
         bound(page, 0, 1000, "page")
+        if source == "rosstandard" and catalog in {"sp", "gost"}:
+            return self._rosstandard_search("", catalog, page + 1, refresh)
         if source != "meganorm" or catalog not in CATALOGS:
-            raise NormsError("INVALID_ARGUMENT", "Use source=meganorm and catalog=sp|gost|gost_r|snip")
+            raise NormsError(
+                "INVALID_ARGUMENT", "Choose meganorm with sp|gost|gost_r|snip, or rosstandard with sp|gost"
+            )
         url = CATALOGS[catalog].replace("_0.html", f"_{page}.html")
         return self._catalog(url, refresh)
 
     def _official_search(self, query, category, page=1, refresh=False):
         url = "https://new.gostinfo.ru/catalog?" + urlencode({"catalog": category, "q": query, "page": page})
         return self._catalog(url, refresh)
+
+    def _rosstandard_search(self, query, category, page=1, refresh=False):
+        return self._catalog(rosstandard.search_url(query, category, page), refresh)
 
     @bounded_network
     def search(
@@ -131,12 +153,21 @@ class Service:
         code = designation(query)
         anchor = catalog_anchor(query)
         if online:
+            rosstandard_available = True
             categories = (
                 ["sp"]
                 if code and code.startswith("СП ")
                 else (["gost"] if code and code.startswith("ГОСТ") else ["sp", "gost"])
             )
             for category in categories:
+                if rosstandard_available:
+                    try:
+                        result = self._rosstandard_search(code or anchor or query, category, 1, refresh)
+                        remote.extend(result["items"])
+                        provenance.append(result["provenance"])
+                    except NormsError as exc:
+                        errors.append({"source": "rosstandard", **exc.payload()})
+                        rosstandard_available = not exc.retryable
                 try:
                     result = self._official_search(code or query, category, 1, refresh)
                     remote.extend(result["items"])
@@ -393,7 +424,7 @@ class Service:
                         key=lambda item: (
                             not bool(item.get("snapshot_id")),
                             item.get("change_number") is not None,
-                            item["source"] != "gostinfo",
+                            {"rosstandard": 0, "gostinfo": 1}.get(item["source"], 2),
                             -len(item["title"]),
                         ),
                     )
@@ -468,6 +499,7 @@ class Service:
         use_cached = (
             cached
             and not refresh
+            and cached["source"] == source_for(url)[0]
             and (cached["text_status"] != "extracted_pdf" or cached.get("identity_verified_from_cover"))
             and designation(cached.get("fields", {}).get("Обозначение", cached["title"])) == cached["code"]
             and (
@@ -633,36 +665,18 @@ class Service:
                 }
             )
         category = "sp" if normalized.startswith("СП ") else "gost"
-        cards, errors, search_complete = [], [], False
-        search_evidence = []
-        for page in range(1, 6):
-            try:
-                result = self._official_search(normalized, category, page, refresh)
-                search_evidence.append(result["provenance"])
-                for item in result["items"]:
-                    if item["code"] != normalized:
-                        continue
-                    try:
-                        summary = self.open(item["url"], refresh=refresh)
-                        doc = self.store.get(summary["snapshot_id"])
-                        if (
-                            doc["authority"] != "official_catalog"
-                            or doc["code"] != normalized
-                            or doc.get("change_number") != item.get("change_number")
-                        ):
-                            raise NormsError(
-                                "OFFICIAL_CARD_IDENTITY_MISMATCH",
-                                "Official card does not match its catalogue listing",
-                            )
-                        cards.append(doc)
-                    except NormsError as exc:
-                        errors.append({"url": item["url"], **exc.payload()})
-                if not result["next_urls"]:
-                    search_complete = True
-                    break
-            except NormsError as exc:
-                errors.append({"source": "gostinfo", **exc.payload()})
-                break
+        cards, errors, search_evidence, coverage = [], [], [], {}
+        for source, search_catalogue in (
+            ("rosstandard", self._rosstandard_search),
+            ("gostinfo", self._official_search),
+        ):
+            catalogue_complete, card_errors, found = self._check_catalogue(
+                source, search_catalogue, normalized, category, refresh, search_evidence
+            )
+            cards.extend(found)
+            errors.extend(card_errors)
+            coverage[source] = {"complete": catalogue_complete and not card_errors, "cards": len(found)}
+        search_complete = all(source["complete"] for source in coverage.values())
         loaded = self.store.get(snapshot_id) if snapshot_id else None
         result = verify(
             normalized,
@@ -674,8 +688,66 @@ class Service:
             errors=errors,
         )
         result["search_evidence"] = search_evidence
+        result["source_coverage"] = coverage
         result["snapshot_id"] = snapshot_id
         return self.store.save_verification(result)
+
+    def _check_catalogue(self, source, search_catalogue, code, category, refresh, evidence):
+        cards, errors = [], []
+        visited = set()
+        for page in range(1, 6):
+            try:
+                result = search_catalogue(code, category, page, refresh)
+            except NormsError as exc:
+                errors.append({"source": source, **exc.payload()})
+                break
+            evidence.append(result["provenance"] | {"source": source})
+            pending = deque(item for item in result["items"] if item["code"] == code)
+            while pending:
+                item = pending.popleft()
+                if item["url"] in visited:
+                    continue
+                visited.add(item["url"])
+                try:
+                    summary = self.open(item["url"], refresh=refresh)
+                    doc = self.store.get(summary["snapshot_id"])
+                    if (
+                        doc["source"] != source
+                        or doc["authority"] != "official_catalog"
+                        or doc["code"] != code
+                        or doc.get("change_number") != item.get("change_number")
+                    ):
+                        raise NormsError(
+                            "OFFICIAL_CARD_IDENTITY_MISMATCH",
+                            "Official card does not match its catalogue listing",
+                        )
+                    cards.append(doc)
+                    if source == "rosstandard" and doc.get("change_number") is None:
+                        if not doc["change_list_observed"]:
+                            raise NormsError(
+                                "SOURCE_LAYOUT_CHANGED", "Rosstandard amendment tab could not be read"
+                            )
+                        for change in doc["amendment_links"]:
+                            if change["code"] != code:
+                                errors.append(
+                                    {
+                                        "source": source,
+                                        "url": change["url"],
+                                        **NormsError(
+                                            "OFFICIAL_CARD_IDENTITY_MISMATCH",
+                                            "Amendment link names another document",
+                                        ).payload(),
+                                    }
+                                )
+                            else:
+                                pending.append(change)
+                except NormsError as exc:
+                    errors.append({"source": source, "url": item["url"], **exc.payload()})
+                    if exc.code == "NETWORK_BUDGET_EXCEEDED":
+                        return False, errors, cards
+            if not result["next_urls"]:
+                return True, errors, cards
+        return False, errors, cards
 
     @bounded_network
     def batch_check(self, items: list, as_of=None, refresh=True):

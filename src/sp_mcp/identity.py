@@ -40,7 +40,9 @@ def prefer_candidate(previous, incoming):
 
     def quality(item):
         origin = urlsplit(item.get("discovered_from", ""))
-        official_listing = item.get("source") == "gostinfo" and origin.path.rstrip("/") == "/catalog"
+        official_listing = (item.get("source") == "gostinfo" and origin.path.rstrip("/") == "/catalog") or (
+            item.get("source") == "rosstandard" and origin.path.rstrip("/") in {"/sp", "/gost"}
+        )
         title = clean(item.get("title", ""))
         label = clean(item.get("label", ""))
         rich = any(len(value) > len(candidate_code(item) or "") + 12 for value in (title, label))

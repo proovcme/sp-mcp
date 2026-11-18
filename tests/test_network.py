@@ -1,9 +1,12 @@
 import asyncio
+import gzip
 import time
 from dataclasses import replace
 from urllib.robotparser import RobotFileParser
 
+import httpx
 import pytest
+from conftest import ros_empty_catalogue
 
 from sp_mcp.errors import NormsError
 from sp_mcp.network import Network
@@ -62,7 +65,7 @@ def test_search_uses_one_wall_clock_budget_and_reports_partial_coverage(config, 
         timeouts.append(timeout)
         if len(timeouts) == 1:
             await asyncio.sleep(0.2)
-            return {"url": url, "raw": b"<html></html>", "checked_at": "2026-11-18T00:00:00+00:00"}
+            return ros_empty_catalogue(url)
         await asyncio.sleep(timeout + 0.02)
         raise TimeoutError
 
@@ -75,3 +78,28 @@ def test_search_uses_one_wall_clock_budget_and_reports_partial_coverage(config, 
     assert result["match_status"] == "search_incomplete"
     assert result["search_provenance"]
     assert any(error["error_code"] == "NETWORK_BUDGET_EXCEEDED" for error in result["source_errors"])
+
+
+@pytest.mark.parametrize("size", [32, 1024])
+def test_rosstandard_gzip_obeys_decoded_size_limit(config, monkeypatch, size):
+    original_client = httpx.AsyncClient
+    body = b"a" * size
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield gzip.compress(body)
+
+    def send(request):
+        assert request.headers["accept-encoding"] == "gzip"
+        return httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=Body())
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: original_client(**kw, transport=httpx.MockTransport(send))
+    )
+    network = Network(replace(config, max_bytes=128))
+    url = "https://protect.gost.ru/sp/"
+    if size < 128:
+        assert network._request(url)["raw"] == body
+    else:
+        with pytest.raises(NormsError, match="bounded download"):
+            network._request(url)

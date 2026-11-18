@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit
+
 import pytest
 
 from sp_mcp.config import Config
@@ -34,3 +36,10 @@ def official_html(code="СП 900.100.2099", change=None, effective="01.02.2020",
     return f"""<html><head><meta charset="utf-8"></head><body><main><h1>{label}</h1><dl>
     <dt>Обозначение</dt><dd>{label}</dd><dt>Статус</dt><dd>{status}</dd>
     <dt>{date_label}</dt><dd>{effective}</dd></dl></main></body></html>"""
+
+
+def ros_empty_catalogue(url):
+    path = urlsplit(url).path
+    return fetched(
+        f'<form method="GET" action="{path}"><input name="search"></form><h3>Документы не найдены</h3>', url
+    )

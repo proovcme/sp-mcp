@@ -72,7 +72,7 @@ def create_server(config):
         include_inactive: bool = False,
     ) -> dict:
         """Search by full designation or words. Returns candidates, never confirmed applicability.
-        Online search queries official SP/GOST metadata and bounded MegaNorm SP catalogues.
+        Online search queries Rosstandard and Gostinfo SP/GOST metadata and bounded MegaNorm catalogues.
         Default concept mode uses Russian morphology, BM25, spelling corrections and a curated lexicon, no model.
         Optional hybrid/semantic modes require a separately configured local embedding index; no generation API.
         Explicitly inactive documents are hidden by default; include_inactive restores historical results.
@@ -86,14 +86,14 @@ def create_server(config):
     def sp_browse_catalog(
         source: str = "meganorm", catalog: str = "sp", page: int = 0, refresh: bool = False
     ) -> dict:
-        """Discover one MegaNorm catalogue page: sp|gost|gost_r|snip. Page is zero-based.
+        """Discover one page of meganorm (sp|gost|gost_r|snip) or rosstandard (sp|gost). Page is zero-based.
         Returns exact URLs and discovery checksums. Discovery is not a status check.
         """
         return service.browse(source, catalog, page, refresh)
 
     @tool(read)
     def sp_open_document(url: str, refresh: bool = False, latest_revision: bool = False) -> dict:
-        """Open a discovered HTTPS MegaNorm or Gostinfo card/PDF, save immutable source bytes.
+        """Open a discovered HTTPS Rosstandard/Gostinfo card or MegaNorm source, saving immutable source bytes.
         Returns snapshot_id, edition metadata, revision links, table counts and SHA-256.
         latest_revision follows newest linked edition; it does not certify its effective date.
         Official catalogue cards are metadata_only. PDF tables/formulae need visual verification.

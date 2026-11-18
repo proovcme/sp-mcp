@@ -26,38 +26,45 @@ def verify(code, official, loaded=None, *, as_of=None, freshness_days=7, search_
     ]
     unresolved, conflicts = [], []
     state = "unconfirmed"
+    supersedes = sorted({code for card in base for code in card.get("supersedes", [])})
+    superseded_by = sorted({code for card in base for code in card.get("superseded_by", [])})
+    other_changes = [change for card in base for change in card.get("other_change_links", [])]
     if target != today:
         unresolved.append("Current catalogue observations do not certify status on another date")
     if not base:
         unresolved.append("No exact base document card confirmed in the official catalogue")
-    elif len({(d["declared_status"], d.get("effective_from"), d.get("effective_to")) for d in base}) > 1:
-        conflicts.append({"kind": "official_status_disagreement"})
     else:
-        card = base[0]
-        start, end = card.get("effective_from"), card.get("effective_to")
-        observed = datetime.fromisoformat(card["provenance"]["checked_at"])
-        fresh = datetime.now(timezone.utc) - observed <= timedelta(days=freshness_days)
-        if not fresh:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=freshness_days)
+        recent = [card for card in base if datetime.fromisoformat(card["provenance"]["checked_at"]) >= cutoff]
+        known = {}
+        for key in ("declared_status", "effective_from", "effective_to"):
+            values = {d[key] for d in (recent or base) if d.get(key) not in {None, "", "unknown"}}
+            if len(values) > 1:
+                conflicts.append(
+                    {"kind": "official_status_disagreement", "field": key, "values": sorted(values)}
+                )
+            known[key] = next(iter(values)) if len(values) == 1 else None
+        start, end = known["effective_from"], known["effective_to"]
+        declared_status = known["declared_status"]
+        if not recent:
             unresolved.append("Official status observation is older than the configured freshness limit")
-        if start and end and start >= end:
+        if conflicts:
+            pass
+        elif start and end and start >= end:
             conflicts.append({"kind": "invalid_base_effective_period"})
         elif target == today and (
-            (end and end > target.isoformat() and card["declared_status"] in {"cancelled", "replaced"})
-            or (end and end <= target.isoformat() and card["declared_status"] == "active")
-            or (start and start > target.isoformat() and card["declared_status"] == "active")
+            (end and end > target.isoformat() and declared_status in {"cancelled", "replaced"})
+            or (end and end <= target.isoformat() and declared_status == "active")
+            or (start and start > target.isoformat() and declared_status == "active")
         ):
             conflicts.append({"kind": "official_status_effective_date_disagreement"})
         elif start and target < date.fromisoformat(start):
             state = "not_yet_effective"
         elif end and target >= date.fromisoformat(end):
-            state = (
-                card["declared_status"]
-                if card["declared_status"] in {"cancelled", "replaced"}
-                else "cancelled"
-            )
-        elif target == today and fresh:
-            if card["declared_status"] != "unknown":
-                state = card["declared_status"]
+            state = declared_status if declared_status in {"cancelled", "replaced"} else "cancelled"
+        elif target == today and recent:
+            if declared_status:
+                state = declared_status
             else:
                 unresolved.append("Official card has no recognized status")
     if not search_complete:
@@ -65,7 +72,7 @@ def verify(code, official, loaded=None, *, as_of=None, freshness_days=7, search_
     amendment_dates = {}
     for amendment in amendments:
         amendment_dates.setdefault(amendment["change_number"], set()).add(amendment.get("effective_from"))
-    undated = sorted(number for number, dates in amendment_dates.items() if None in dates)
+    undated = sorted(number for number, dates in amendment_dates.items() if not dates - {None})
     for number, dates in amendment_dates.items():
         if len(dates - {None}) > 1:
             conflicts.append({"kind": "official_amendment_date_disagreement", "change_number": number})
@@ -110,6 +117,7 @@ def verify(code, official, loaded=None, *, as_of=None, freshness_days=7, search_
                 and not future
                 and not unknown
                 and not undated
+                and not other_changes
                 and not unresolved
                 and state != "unconfirmed"
                 and not errors
@@ -155,6 +163,9 @@ def verify(code, official, loaded=None, *, as_of=None, freshness_days=7, search_
         "missing_changes": missing,
         "unknown_changes": unknown,
         "undated_changes": undated,
+        "supersedes": supersedes,
+        "superseded_by": superseded_by,
+        "other_changes": other_changes,
         "applicability": "not_assessed",
         "evidence": evidence,
         "conflicts": conflicts,

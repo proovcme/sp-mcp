@@ -3,7 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 
 from .errors import NormsError
@@ -65,7 +65,7 @@ class Store:
 
     @contextmanager
     def db(self):
-        with sqlite3.connect(self.root / "norms.sqlite3", timeout=30) as db:
+        with closing(sqlite3.connect(self.root / "norms.sqlite3", timeout=30)) as db, db:
             db.row_factory = sqlite3.Row
             yield db
 
